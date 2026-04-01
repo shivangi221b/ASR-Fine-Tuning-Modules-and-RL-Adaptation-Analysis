@@ -28,6 +28,7 @@ MAX_DURATION_S: float = 30.0
 
 def build_nemo_manifest(
     dataset,
+    dataset_name: str,
     split_name: str,
     audio_dir: str,
     manifest_dir: str,
@@ -39,18 +40,33 @@ def build_nemo_manifest(
     Decode audio from a HuggingFace Dataset split, write WAV files, and
     produce a NeMo-format JSON manifest.
 
+    The output manifest is named ``{dataset_name}_{split_name}.json`` so that
+    manifests for different datasets can coexist in the same directory without
+    collision (e.g. ``afrispeech_clinical_train.json`` and
+    ``voxpopuli_train.json`` both live in ``data/manifests/``).
+
+    WAV files are written as ``{split_name}_{index:06d}.wav`` inside
+    *audio_dir*, which should already be scoped per-dataset by the caller
+    (e.g. ``data/audio/afrispeech_clinical/``).
+
     Parameters
     ----------
     dataset : datasets.Dataset
         A single split (not a DatasetDict).
+    dataset_name : str
+        Dataset identifier used as the filename prefix, e.g.
+        ``"afrispeech_clinical"``, ``"voxpopuli"``, ``"librispeech"``.
     split_name : str
-        Label used in file names, e.g. "train", "val", "test".
+        Split label used in the filename, e.g. ``"train"``, ``"val"``,
+        ``"test"``, ``"forgetting_eval"``.
     audio_dir : str
-        Directory where WAV files are written.
+        Directory where WAV files are written.  Should be dataset-scoped to
+        avoid filename collisions across datasets.
     manifest_dir : str
-        Directory where the manifest JSONL file is written.
+        Directory where the manifest file is written.  Shared across datasets;
+        collision is prevented by the ``dataset_name`` prefix in the filename.
     text_field : str
-        Column name in *dataset* that contains the ground-truth transcript.
+        Column name in *dataset* that holds the ground-truth transcript.
     min_duration : float
         Utterances shorter than this (seconds) are skipped.
     max_duration : float
@@ -63,7 +79,7 @@ def build_nemo_manifest(
     """
     os.makedirs(audio_dir, exist_ok=True)
     os.makedirs(manifest_dir, exist_ok=True)
-    manifest_path = os.path.join(manifest_dir, f"{split_name}_manifest.json")
+    manifest_path = os.path.join(manifest_dir, f"{dataset_name}_{split_name}.json")
 
     written = 0
     skipped = 0

@@ -28,17 +28,23 @@ This folder is the single source of truth for all datasets used across the NeMo 
 
 ## Directory structure (after preparation)
 
+Manifest filenames follow the pattern `{dataset_name}_{split}.json`, where
+`dataset_name` is the key passed to `load_dataset_bundle` (e.g.
+`"afrispeech_clinical"`, `"voxpopuli"`, `"librispeech"`). Audio directories
+are scoped per-dataset so WAV filenames (`{split}_{index:06d}.wav`) never
+collide across datasets.
+
 ```
 data/
-├── manifests/          # NeMo-format JSON manifests (audio_filepath, duration, text)
-│   ├── afrispeech_clinical_train.json
-│   ├── afrispeech_clinical_val.json
-│   ├── afrispeech_clinical_test.json
-│   ├── voxpopuli_en_train.json
-│   ├── voxpopuli_en_val.json
-│   └── librispeech_clean100_val.json
-└── audio/              # Raw audio (populated by dataset download scripts)
-    ├── afrispeech/
+├── manifests/                              # JSONL manifests (audio_filepath, duration, text)
+│   ├── afrispeech_clinical_train.json      # AfriSpeech clinical — training split
+│   ├── afrispeech_clinical_val.json        # AfriSpeech clinical — validation split
+│   ├── afrispeech_clinical_test.json       # AfriSpeech clinical — test split
+│   ├── voxpopuli_train.json                # VoxPopuli EN — training split
+│   ├── voxpopuli_val.json                  # VoxPopuli EN — validation split
+│   └── librispeech_forgetting_eval.json    # LibriSpeech — catastrophic-forgetting eval
+└── audio/                                  # Decoded WAV files (gitignored)
+    ├── afrispeech_clinical/                # one sub-dir per dataset_name
     ├── voxpopuli/
     └── librispeech/
 ```

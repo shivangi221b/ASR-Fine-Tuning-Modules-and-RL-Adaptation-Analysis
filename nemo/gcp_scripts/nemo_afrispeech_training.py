@@ -41,9 +41,14 @@ from jiwer import wer as compute_wer_jiwer
 from omegaconf import DictConfig, OmegaConf
 
 # ---------------------------------------------------------------------------
-# Shared data module (repo root / data/)
+# Repo root and shared data paths
 # ---------------------------------------------------------------------------
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# parents[0] = gcp_scripts/, parents[1] = nemo/, parents[2] = repo root
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SHARED_MANIFEST_DIR = str(_REPO_ROOT / "data" / "manifests")
+_SHARED_AUDIO_DIR = str(_REPO_ROOT / "data" / "audio")
+
+sys.path.insert(0, str(_REPO_ROOT))
 from data import (  # noqa: E402
     build_nemo_manifest,
     load_dataset_bundle,
@@ -105,10 +110,11 @@ class Config:
     REWARD_STEP_INTERVAL: int = 4  # inject reward every N optimizer steps
     MAX_ENCODER_LEN_FOR_REWARD: int = 2000  # long-audio guard (frames)
 
-    OUTPUT_DIR: str = "./nemo-afrispeech-output"
+    OUTPUT_DIR: str = "./nemo-afrispeech-output"  # training artifacts (checkpoints, results)
     CHECKPOINT_DIR: str = "./checkpoints"
-    MANIFEST_DIR: str = "./manifests"
     RESULTS_DIR: str = "./results"
+    # Manifests and audio are written to the shared data/ directory (see _SHARED_MANIFEST_DIR
+    # and _SHARED_AUDIO_DIR) and are not configurable here to keep them toolkit-agnostic.
 
     SEED: int = 42
 
@@ -874,21 +880,25 @@ def _dataset_loader_kwargs() -> dict:
 
 def prepare_manifests() -> Dict[str, str]:
     ds, text_field = load_dataset_bundle(CFG.DATASET, **_dataset_loader_kwargs())
-    audio_root = os.path.join(CFG.OUTPUT_DIR, "audio")
+    # Audio is written to data/audio/<dataset_name>/ so clips from different
+    # datasets never share a directory and WAV filenames cannot collide.
+    audio_dir = os.path.join(_SHARED_AUDIO_DIR, CFG.DATASET)
     out: Dict[str, str] = {}
-    out["train"] = build_nemo_manifest(ds["train"], "train", audio_root, CFG.MANIFEST_DIR, text_field)
-    out["val"] = build_nemo_manifest(ds["validation"], "val", audio_root, CFG.MANIFEST_DIR, text_field)
+    out["train"] = build_nemo_manifest(ds["train"], CFG.DATASET, "train", audio_dir, _SHARED_MANIFEST_DIR, text_field)
+    out["val"] = build_nemo_manifest(ds["validation"], CFG.DATASET, "val", audio_dir, _SHARED_MANIFEST_DIR, text_field)
     if "test" in ds:
-        out["test"] = build_nemo_manifest(ds["test"], "test", audio_root, CFG.MANIFEST_DIR, text_field)
+        out["test"] = build_nemo_manifest(ds["test"], CFG.DATASET, "test", audio_dir, _SHARED_MANIFEST_DIR, text_field)
     return out
 
 
 def prepare_librispeech_eval_manifest() -> str:
-    """Small eval manifest on LibriSpeech validation for forgetting check."""
+    """Forgetting-eval manifest: LibriSpeech validation written to the shared data/ dir."""
     val_n = 200 if CFG.SMOKE_TEST else 2_703
     eval_ds, text_field = load_librispeech_eval(val_n=val_n)
-    audio_root = os.path.join(CFG.OUTPUT_DIR, "audio_librispeech_eval")
-    return build_nemo_manifest(eval_ds, "librispeech_eval", audio_root, CFG.MANIFEST_DIR, text_field)
+    audio_dir = os.path.join(_SHARED_AUDIO_DIR, "librispeech")
+    return build_nemo_manifest(
+        eval_ds, "librispeech", "forgetting_eval", audio_dir, _SHARED_MANIFEST_DIR, text_field
+    )
 
 
 def catastrophic_forgetting_eval(model: EncDecCTCModelBPE, libri_manifest: str) -> Dict[str, Any]:
@@ -984,7 +994,7 @@ def run_full_pipeline() -> Dict[str, Any]:
 
     out_path = Path(CFG.RESULTS_DIR) / f"{run_id}_results.json"
     save_results_json(results, out_path)
-    upload_dir_to_gcs(str(Path(CFG.MANIFEST_DIR)), CFG.UPLOAD_GCS_URI)
+    upload_dir_to_gcs(_SHARED_MANIFEST_DIR, CFG.UPLOAD_GCS_URI)
 
     logger.info("Done. Key val WER: sft=%.2f rl=%.2f", sft_metrics["wer"], rl_metrics["wer"])
     return results
