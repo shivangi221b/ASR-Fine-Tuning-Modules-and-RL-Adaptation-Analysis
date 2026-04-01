@@ -27,6 +27,7 @@ import math
 import os
 import random
 import subprocess
+import sys
 import time
 import types
 from dataclasses import dataclass, field, asdict
@@ -34,12 +35,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-import soundfile as sf
 import torch
-from datasets import Audio, Dataset, DatasetDict, load_dataset
 from jiwer import cer as compute_cer_jiwer
 from jiwer import wer as compute_wer_jiwer
 from omegaconf import DictConfig, OmegaConf
+
+# ---------------------------------------------------------------------------
+# Shared data module (repo root / data/)
+# ---------------------------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from data import (  # noqa: E402
+    build_nemo_manifest,
+    load_dataset_bundle,
+    load_librispeech_eval,
+)
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import Callback
@@ -214,150 +223,6 @@ def apply_smoke_test_overrides() -> None:
     CFG.RUN_LIBRISPEECH_FORGETTING = False
     CFG.BOOTSTRAP_ITERS = 100
     CFG.RUN_FINAL_TEST_EVAL = True
-
-
-# ===========================================================================
-# DATASETS
-# ===========================================================================
-
-
-def _resolve_afrispeech_name() -> str:
-    try:
-        load_dataset("intronhealth/afrispeech-200", "all", split="validation", streaming=True)
-        return "intronhealth/afrispeech-200"
-    except Exception:
-        return "tobiolatunji/afrispeech-200"
-
-
-def _collect_clinical_from_stream(stream, max_n: Optional[int]) -> List[dict]:
-    out: List[dict] = []
-    for sample in stream:
-        if str(sample.get("domain", "")).lower() != "clinical":
-            continue
-        if not str(sample.get("transcript", "")).strip():
-            continue
-        out.append(sample)
-        if max_n is not None and len(out) >= max_n:
-            break
-    return out
-
-
-def load_afrispeech_clinical() -> Tuple[DatasetDict, str]:
-    """Official train / validation / test with clinical filter."""
-    name = _resolve_afrispeech_name()
-    logger.info("Loading AfriSpeech-200 clinical (train/validation/test) from %s", name)
-
-    logger.info("  Streaming TRAIN (clinical) …")
-    train_stream = load_dataset(name, "all", split="train", streaming=True)
-    train_samples = _collect_clinical_from_stream(train_stream, CFG.TRAIN_SAMPLES)
-    logger.info("  Train clinical clips: %d (cap=%s)", len(train_samples), CFG.TRAIN_SAMPLES)
-
-    logger.info("  Streaming VALIDATION (clinical) …")
-    val_stream = load_dataset(name, "all", split="validation", streaming=True)
-    val_samples = _collect_clinical_from_stream(val_stream, CFG.VAL_SAMPLES)
-    logger.info("  Val clinical clips: %d (cap=%s)", len(val_samples), CFG.VAL_SAMPLES)
-
-    test_samples: List[dict] = []
-    if CFG.RUN_FINAL_TEST_EVAL:
-        logger.info("  Streaming TEST (clinical) …")
-        test_stream = load_dataset(name, "all", split="test", streaming=True)
-        test_samples = _collect_clinical_from_stream(test_stream, CFG.TEST_SAMPLES)
-        logger.info("  Test clinical clips: %d (cap=%s)", len(test_samples), CFG.TEST_SAMPLES)
-
-    train_ds = Dataset.from_list(train_samples).cast_column("audio", Audio(sampling_rate=16_000))
-    val_ds = Dataset.from_list(val_samples).cast_column("audio", Audio(sampling_rate=16_000))
-    splits: Dict[str, Any] = {"train": train_ds, "validation": val_ds}
-    if test_samples:
-        splits["test"] = Dataset.from_list(test_samples).cast_column("audio", Audio(sampling_rate=16_000))
-    return DatasetDict(splits), "transcript"
-
-
-def load_librispeech_for_training() -> Tuple[DatasetDict, str]:
-    """Train slice + full validation (or capped for smoke)."""
-    logger.info("Loading LibriSpeech clean-100 …")
-    train_n = CFG.LIBRISPEECH_TRAIN_CAP
-    val_n = 2_703 if not CFG.SMOKE_TEST else min(50, 2_703)
-    ds = load_dataset(
-        "librispeech_asr",
-        "clean",
-        split={
-            "train": f"train.100[:{train_n}]",
-            "validation": f"validation[:{val_n}]",
-        },
-    )
-    ds = ds.cast_column("audio", Audio(sampling_rate=16_000))
-    logger.info("  LibriSpeech train=%d val=%d", len(ds["train"]), len(ds["validation"]))
-    return ds, "text"
-
-
-def load_voxpopuli() -> Tuple[DatasetDict, str]:
-    """Random train subset + official validation."""
-    logger.info("Loading VoxPopuli English …")
-    train_n = CFG.VOXPOPULI_TRAIN_SUBSET if not CFG.SMOKE_TEST else min(40, CFG.VOXPOPULI_TRAIN_SUBSET)
-    # Load metadata + audio paths (heavy); shuffle with seed for reproducibility
-    ds_train_full = load_dataset("facebook/voxpopuli", "en", split="train")
-    rng = np.random.RandomState(CFG.SEED)
-    n_take = min(train_n, len(ds_train_full))
-    indices = rng.choice(len(ds_train_full), size=n_take, replace=False)
-    train_ds = ds_train_full.select(indices.tolist())
-
-    val_n = 1_750 if not CFG.SMOKE_TEST else min(20, 1_750)
-    val_ds = load_dataset("facebook/voxpopuli", "en", split=f"validation[:{val_n}]")
-
-    ds = DatasetDict({"train": train_ds, "validation": val_ds})
-    ds = DatasetDict({k: v.cast_column("audio", Audio(sampling_rate=16_000)) for k, v in ds.items()})
-    logger.info("  VoxPopuli train=%d val=%d", len(ds["train"]), len(ds["validation"]))
-    return ds, "normalized_text"
-
-
-def load_dataset_bundle(name: str) -> Tuple[DatasetDict, str]:
-    if name == "afrispeech_clinical":
-        return load_afrispeech_clinical()
-    if name == "librispeech":
-        return load_librispeech_for_training()
-    if name == "voxpopuli":
-        return load_voxpopuli()
-    raise ValueError(f"Unknown dataset: {name}")
-
-
-# ===========================================================================
-# MANIFEST
-# ===========================================================================
-
-
-def build_nemo_manifest(dataset, split_name: str, audio_dir: str, text_field: str) -> str:
-    os.makedirs(audio_dir, exist_ok=True)
-    os.makedirs(CFG.MANIFEST_DIR, exist_ok=True)
-    manifest_path = os.path.join(CFG.MANIFEST_DIR, f"{split_name}_manifest.json")
-    written = 0
-    skipped = 0
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        for i, sample in enumerate(dataset):
-            try:
-                audio_array = sample["audio"]["array"]
-                sr = int(sample["audio"]["sampling_rate"])
-            except (KeyError, TypeError):
-                skipped += 1
-                continue
-            text = str(sample.get(text_field, "")).strip().lower()
-            if not text:
-                skipped += 1
-                continue
-            wav_path = os.path.join(audio_dir, f"{split_name}_{i:06d}.wav")
-            sf.write(wav_path, audio_array, sr)
-            duration = len(audio_array) / float(sr)
-            if duration < 0.5 or duration > 30.0:
-                skipped += 1
-                continue
-            entry = {
-                "audio_filepath": os.path.abspath(wav_path),
-                "text": text,
-                "duration": round(duration, 3),
-            }
-            f.write(json.dumps(entry) + "\n")
-            written += 1
-    logger.info("  Manifest %s: %d rows (%d skipped)", manifest_path, written, skipped)
-    return manifest_path
 
 
 # ===========================================================================
@@ -988,28 +853,42 @@ def evaluate_zero_shot_bundle(val_manifest: str) -> Dict[str, Any]:
 # ===========================================================================
 
 
+def _dataset_loader_kwargs() -> dict:
+    """Translate the active CFG into keyword arguments for the data module loaders."""
+    if CFG.DATASET == "afrispeech_clinical":
+        return dict(
+            train_n=CFG.TRAIN_SAMPLES,
+            val_n=CFG.VAL_SAMPLES,
+            test_n=CFG.TEST_SAMPLES,
+            load_test=CFG.RUN_FINAL_TEST_EVAL,
+        )
+    if CFG.DATASET == "librispeech":
+        val_n = min(50, 2_703) if CFG.SMOKE_TEST else 2_703
+        return dict(train_n=CFG.LIBRISPEECH_TRAIN_CAP, val_n=val_n)
+    if CFG.DATASET == "voxpopuli":
+        train_n = min(40, CFG.VOXPOPULI_TRAIN_SUBSET) if CFG.SMOKE_TEST else CFG.VOXPOPULI_TRAIN_SUBSET
+        val_n = min(20, 1_750) if CFG.SMOKE_TEST else 1_750
+        return dict(train_n=train_n, val_n=val_n, seed=CFG.SEED)
+    return {}
+
+
 def prepare_manifests() -> Dict[str, str]:
-    ds, text_field = load_dataset_bundle(CFG.DATASET)
+    ds, text_field = load_dataset_bundle(CFG.DATASET, **_dataset_loader_kwargs())
     audio_root = os.path.join(CFG.OUTPUT_DIR, "audio")
     out: Dict[str, str] = {}
-    out["train"] = build_nemo_manifest(ds["train"], "train", audio_root, text_field)
-    out["val"] = build_nemo_manifest(ds["validation"], "val", audio_root, text_field)
+    out["train"] = build_nemo_manifest(ds["train"], "train", audio_root, CFG.MANIFEST_DIR, text_field)
+    out["val"] = build_nemo_manifest(ds["validation"], "val", audio_root, CFG.MANIFEST_DIR, text_field)
     if "test" in ds:
-        out["test"] = build_nemo_manifest(ds["test"], "test", audio_root, text_field)
+        out["test"] = build_nemo_manifest(ds["test"], "test", audio_root, CFG.MANIFEST_DIR, text_field)
     return out
 
 
 def prepare_librispeech_eval_manifest() -> str:
     """Small eval manifest on LibriSpeech validation for forgetting check."""
-    vn = 200 if CFG.SMOKE_TEST else 2_703
-    ds = load_dataset(
-        "librispeech_asr",
-        "clean",
-        split={"validation": f"validation[:{vn}]"},
-    )
-    ds = ds["validation"].cast_column("audio", Audio(sampling_rate=16_000))
+    val_n = 200 if CFG.SMOKE_TEST else 2_703
+    eval_ds, text_field = load_librispeech_eval(val_n=val_n)
     audio_root = os.path.join(CFG.OUTPUT_DIR, "audio_librispeech_eval")
-    return build_nemo_manifest(ds, "librispeech_eval", audio_root, "text")
+    return build_nemo_manifest(eval_ds, "librispeech_eval", audio_root, CFG.MANIFEST_DIR, text_field)
 
 
 def catastrophic_forgetting_eval(model: EncDecCTCModelBPE, libri_manifest: str) -> Dict[str, Any]:
