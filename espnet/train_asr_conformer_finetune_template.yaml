@@ -1,0 +1,126 @@
+# ============================================================
+# ESPnet2 Fine-Tuning Config
+# Conformer ASR — pretrained encoder, frozen bottom 6 layers,
+# warmup LR (5000 steps, peak lr=1e-4), SpecAugment
+# ============================================================
+
+# ----- Architecture -----
+encoder: conformer
+encoder_conf:
+    output_size: 256          # must match the pretrained checkpoint
+    attention_heads: 4
+    linear_units: 2048
+    num_blocks: 12
+    dropout_rate: 0.1
+    positional_dropout_rate: 0.1
+    attention_dropout_rate: 0.1
+    input_layer: conv2d
+    normalize_before: true
+    rel_pos_type: latest
+    pos_enc_layer_type: rel_pos
+    selfattention_layer_type: rel_selfattn
+    activation_type: swish
+    macaron_style: true
+    use_cnn_module: true
+    cnn_module_kernel: 31
+
+decoder: transformer
+decoder_conf:
+    attention_heads: 4
+    linear_units: 2048
+    num_blocks: 6
+    dropout_rate: 0.1
+    positional_dropout_rate: 0.1
+    self_attention_dropout_rate: 0.1
+    src_attention_dropout_rate: 0.1
+
+model_conf:
+    ctc_weight: 0.3           # hybrid CTC / attention-decoder loss
+    lsm_weight: 0.1           # label smoothing
+    length_normalized_loss: false
+
+# ----- Pretrained weights -----
+# Load the full model from a pretrained checkpoint.
+# Format: <path>:<src_key>:<dst_key>:<exclude_keys>
+# Leaving src_key/dst_key empty copies root → root.
+init_param:
+    - /path/to/pretrained/model.pth
+
+# ----- Layer freezing -----
+# Freeze the bottom 6 of 12 encoder layers.
+# encoder.encoders is a ModuleList; indices 0-5 are the lower layers.
+# The embed (subsampling) and after_norm are left unfrozen so the
+# model can adapt its front-end representations.
+freeze_param:
+    - encoder.encoders.0
+    - encoder.encoders.1
+    - encoder.encoders.2
+    - encoder.encoders.3
+    - encoder.encoders.4
+    - encoder.encoders.5
+
+# ----- Frontend -----
+frontend_conf:
+    n_fft: 512
+    hop_length: 160           # 10 ms shift at 16 kHz
+
+# ----- SpecAugment (domain robustness) -----
+specaug: specaug
+specaug_conf:
+    apply_time_warp: true
+    time_warp_window: 5
+    time_warp_mode: bicubic
+    apply_freq_mask: true
+    freq_mask_width_range:
+        - 0
+        - 27                  # max ~17% of 80 mel bins
+    num_freq_mask: 2
+    apply_time_mask: true
+    time_mask_width_ratio_range:
+        - 0.
+        - 0.05                # mask up to 5% of utterance length
+    num_time_mask: 10
+
+# ----- Optimizer -----
+# Peak LR = 1e-4 (set directly on the optimizer).
+# WarmupLR will ramp from ~0 to this value over warmup_steps,
+# then decay as step^-0.5.
+optim: adam
+optim_conf:
+    lr: 1.0e-4
+    betas:
+        - 0.9
+        - 0.98
+    weight_decay: 1.0e-6
+
+# ----- LR Scheduler -----
+# WarmupLR: lr = base_lr * warmup_steps^0.5
+#                * min(step^-0.5, step * warmup_steps^-1.5)
+# Stepped once per effective optimizer step (every accum_grad batches).
+scheduler: warmuplr
+scheduler_conf:
+    warmup_steps: 5000
+
+# ----- Training knobs -----
+use_amp: true                 # mixed precision (requires torch >= 1.6)
+num_workers: 4
+batch_type: numel
+batch_bins: 2000000           # reduce from 35M (full training) for fine-tuning
+accum_grad: 2
+grad_clip: 5.0
+max_epoch: 20
+patience: 5
+
+best_model_criterion:
+    - - valid
+      - acc
+      - max
+keep_nbest_models: 5
+val_scheduler_criterion:
+    - valid
+    - acc
+
+# ----- Misc -----
+# Do NOT reinitialise with random weights after loading init_param.
+init: none
+unused_parameters: false
