@@ -211,13 +211,13 @@ Full fine-tuning    | NeMo      |                 |         | 30M
 ```bash
 gcloud config set project adaptive-ai-487419
 
-# Recommended instance for NeMo (start here)
+# Recommended: N1 + V100 (matches spot cost estimates; request V100 quota if needed)
 gcloud compute instances create stt-nemo-training \
   --project=adaptive-ai-487419 \
   --zone=us-central1-a \
   --machine-type=n1-standard-8 \
-  --accelerator=type=nvidia-tesla-a100,count=1 \
-  --image-family=pytorch-latest-gpu \
+  --accelerator=type=nvidia-tesla-v100,count=1 \
+  --image-family=pytorch-2-7-cu128-ubuntu-2204-nvidia-570 \
   --image-project=deeplearning-platform-release \
   --boot-disk-size=150GB \
   --boot-disk-type=pd-ssd \
@@ -247,7 +247,7 @@ pip install nemo_toolkit[asr]
 pip install datasets soundfile librosa jiwer peft
 
 # Verify GPU
-nvidia-smi  # should show A100 40GB
+nvidia-smi  # should show V100 (use python ... --batch_size 8 for conformer-medium on 16GB)
 
 # Login to HuggingFace (needed for some datasets)
 huggingface-cli login

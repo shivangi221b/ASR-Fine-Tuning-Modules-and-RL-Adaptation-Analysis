@@ -2,17 +2,46 @@
 
 This guide covers running [`gcp_scripts/nemo_afrispeech_training.py`](../gcp_scripts/nemo_afrispeech_training.py) on Google Cloud with GPUs.
 
+**Console (sign-in):** [Google Cloud Console — project adaptive-ai-487419](https://console.cloud.google.com/welcome?project=adaptive-ai-487419)
+
 **Default GCP project (this repo):** `adaptive-ai-487419`  
 **Suggested results bucket:** `gs://adaptive-ai-487419-stt-results`
 
 ---
 
+## Onboarding checklist (one-time on your laptop)
+
+1. **Install [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)** (`gcloud`, `gsutil`).
+2. **Authenticate:** `gcloud auth login` (browser) and, for VM SSH later, `gcloud auth application-default login` if needed.
+3. **Select project:** `gcloud config set project adaptive-ai-487419`
+4. **Billing:** In Cloud Console → Billing, link a billing account to this project (GPU VMs will not start without it).
+5. **Enable APIs** (Console → APIs & Services, or run once):
+   - Compute Engine API  
+   - (Optional) Cloud Storage if prompted when creating buckets.
+6. **GPU quota:** Console → IAM & Admin → Quotas — ensure **NVIDIA V100** (or T4) quota in your zone for N1+GPU; use **A2 / A100** quota only if you pick `a2-highgpu-1g`. Request increases if quota is 0.
+7. **Hugging Face token** (for some datasets): on the VM, `huggingface-cli login` after `pip install huggingface_hub`.
+
+---
+
+## Your laptop can sleep — training runs on the VM
+
+Training **does not** run on your Mac. It runs **inside the GCP VM** after you SSH in.
+
+- **Closing the laptop or losing Wi‑Fi** only drops your **SSH session**. It does **not** stop the VM by default.
+- To keep the **Python process** running after disconnect, start training inside **`tmux`** or **`screen`**, or use **`nohup`**:
+  - **tmux (recommended):** `tmux new -s train` → run your `python ...` command → press `Ctrl+B`, then `D` to detach. Reattach later: `tmux attach -t train`.
+  - **nohup:** `nohup python ... > train.log 2>&1 &` then `tail -f train.log`.
+
+Always pass **`--upload_gcs gs://.../run_id`** so checkpoints and `*_results.json` are copied to Cloud Storage even if the VM is preempted (Spot) or you delete the instance later.
+
+---
+
 ## Overview
 
-**Recommended setup**
+**Recommended setup (matches cost estimates in `project_summary_and_gcp_plan.md`)**
 
-- Instance: `n1-standard-8` (8 vCPU, 30GB RAM)
-- GPU: 1× NVIDIA A100 40GB (preferred) or 1× V100 16GB
+- **`n1-standard-8` + 1× V100** — valid on N1, cheaper spot rates, enough for `stt_en_conformer_ctc_medium` if you use **`--batch_size 8`** (default 16 is tuned for larger GPUs; drop to 4 if you still OOM).
+- **Optional — A100:** `a2-highgpu-1g` only (A100 cannot attach to N1). Faster / more headroom; higher $/hr. Do **not** use `--accelerator=nvidia-tesla-a100` on `n1-standard-*`.
 - Boot disk: 200GB SSD
 - Spot / preemptible: yes, for cost (~70% savings vs on-demand)
 
@@ -47,19 +76,25 @@ Pass `--upload_gcs gs://adaptive-ai-487419-stt-results/run_name` to the training
 ```bash
 gcloud config set project adaptive-ai-487419
 
+# Image family: Google retired the meta-family `pytorch-latest-gpu`. List current
+# families with:
+#   gcloud compute images list --project deeplearning-platform-release \
+#     --no-standard-images --filter="family~pytorch" --format="value(family)" | sort -u
 gcloud compute instances create nemo-training \
     --zone=us-central1-a \
     --project=adaptive-ai-487419 \
     --machine-type=n1-standard-8 \
-    --accelerator=type=nvidia-tesla-a100,count=1 \
+    --accelerator=type=nvidia-tesla-v100,count=1 \
     --maintenance-policy=TERMINATE \
-    --image-family=pytorch-latest-gpu \
+    --image-family=pytorch-2-7-cu128-ubuntu-2204-nvidia-570 \
     --image-project=deeplearning-platform-release \
     --boot-disk-size=200GB \
     --boot-disk-type=pd-ssd \
     --metadata="install-nvidia-driver=True" \
     --scopes=https://www.googleapis.com/auth/cloud-platform \
     --preemptible
+
+# Faster GPU (A100): use --machine-type=a2-highgpu-1g and remove --accelerator (GPU is built-in).
 ```
 
 ### SSH
@@ -68,22 +103,45 @@ gcloud compute instances create nemo-training \
 gcloud compute ssh nemo-training --zone=us-central1-a --project=adaptive-ai-487419
 ```
 
+**`Connection refused` on port 22 right after create:** normal for **several minutes**. With `--metadata="install-nvidia-driver=True"`, the VM often **reboots** while installing the driver; `sshd` is down during that window. Wait **5–15 minutes**, then run `gcloud compute ssh` again. To see boot progress:
+
+```bash
+gcloud compute instances get-serial-port-output nemo-training \
+  --zone=us-central1-a --project=adaptive-ai-487419 | tail -80
+```
+
+If it stays refused after ~20 minutes, check **VPC → Firewall** that a rule allows **tcp:22** to instances with the default network tag (usually `default-allow-ssh`).
+
 ### Environment
+
+Use the **same pins as local** (NumPy &lt; 2, datasets &lt; 3) to avoid NeMo / AfriSpeech breakage. From your laptop you can copy the whole repo or only the requirements file.
 
 ```bash
 mkdir -p ~/nemo-stt && cd ~/nemo-stt
 
-pip install -U pip
-pip install "nemo_toolkit[asr]" datasets soundfile librosa jiwer pandas numpy google-generativeai
+# Option A: copy requirements from your machine (paths relative to your laptop)
+gcloud compute scp requirements-nemo-train.txt nemo-training:~/nemo-stt/ \
+  --zone=us-central1-a --project=adaptive-ai-487419
 
-# Optional: Gemini for RL-LLM (export on VM or use --machine metadata / secret manager)
+# On the VM:
+pip install -U pip
+pip install -r requirements-nemo-train.txt
+
+# Option B: quick one-liner (may drift from repo pins — prefer Option A)
+# pip install -U pip && pip install "numpy>=1.22,<2.0" "datasets>=2.14.0,<3.0.0" \
+#   "nemo_toolkit[asr]" lightning torch soundfile librosa jiwer pandas omegaconf google-generativeai
+
+# Optional: Gemini for RL-LLM
 export GEMINI_API_KEY="..."
 
 nvidia-smi
 python -c "import torch; print('CUDA:', torch.cuda.is_available())"
+
+# Full runs on V100 16GB: use smaller batches (script flag or edit Config)
+#   python nemo_afrispeech_training.py --batch_size 8 --upload_gcs gs://.../run1
 ```
 
-### Upload script
+### Upload script (and optional full `gcp_scripts/`)
 
 From your laptop:
 
@@ -101,14 +159,17 @@ cd ~/nemo-stt
 python nemo_afrispeech_training.py --smoke_test
 ```
 
-**Full AfriSpeech clinical (all train clips, official val/test splits) + GCS upload:**
+**Full AfriSpeech clinical (all train clips, official val/test splits) + GCS upload**  
+(Run inside `tmux` so you can close your laptop; see section above.)
 
 ```bash
+cd ~/nemo-stt
 tmux new -s train
 python nemo_afrispeech_training.py --stage both \
   --dataset afrispeech_clinical \
-  --upload_gcs gs://adaptive-ai-487419-stt-results/exp_afrispeech_$(date +%Y%m%d) \
+  --upload_gcs gs://adaptive-ai-487419-stt-results/exp_afrispeech_$(date +%Y%m%d_%H%M) \
   --seed 42
+# Detach: Ctrl+B, then D
 ```
 
 **SFT only, then RL in separate jobs:**
@@ -167,19 +228,37 @@ See historical example in git history or adapt: container / prebuilt PyTorch DL 
 
 ## Multi-dataset paper workflow
 
-```bash
-# AfriSpeech clinical (default caps: full train, full val, full test clinical)
-python nemo_afrispeech_training.py --stage both --dataset afrispeech_clinical \
-  --upload_gcs gs://adaptive-ai-487419-stt-results/paper/afrispeech
+The script runs **one** `REWARD_MODE` per invocation (`mwer`, `wwer`, `llm`, or `all`). For tables in the paper:
 
-mv checkpoints/sft_model.nemo checkpoints/sft_afrispeech.nemo
-mv checkpoints/rl_model.nemo checkpoints/rl_afrispeech_mwer.nemo  # rename per reward run
+1. Run **SFT once** (or reuse `sft_model.nemo`).
+2. Run **RL** separately for **mwer**, **wwer**, and **llm** (`--real_llm` + `GEMINI_API_KEY`), using `--sft_checkpoint` for WWER/LLM if you already have SFT, with distinct `--upload_gcs` paths or rename `.nemo` after each run.
+3. Repeat with a **second `--seed`** for mean ± std.
+
+```bash
+# Example: AfriSpeech full pipeline with MWER
+python nemo_afrispeech_training.py --stage both --dataset afrispeech_clinical \
+  --reward_mode mwer \
+  --upload_gcs gs://adaptive-ai-487419-stt-results/paper/afrispeech_mwer_seed42
+
+# WWER only (reuse SFT checkpoint)
+python nemo_afrispeech_training.py --stage rl --dataset afrispeech_clinical \
+  --sft_checkpoint ./checkpoints/sft_model.nemo \
+  --reward_mode wwer \
+  --upload_gcs gs://adaptive-ai-487419-stt-results/paper/afrispeech_wwer_seed42
 
 # VoxPopuli
 python nemo_afrispeech_training.py --stage both --dataset voxpopuli \
   --voxpopuli_train_subset 10000 \
-  --upload_gcs gs://adaptive-ai-487419-stt-results/paper/voxpopuli
+  --upload_gcs gs://adaptive-ai-487419-stt-results/paper/voxpopuli_mwer_seed42
 ```
+
+---
+
+## Paper coverage vs this NeMo script
+
+**In scope for this file:** AfriSpeech / VoxPopuli / Libri forget; zero-shot; SFT + reward stage; metrics (WER, CER, SER, EWER-style, domain F1); bootstrap on val; test split eval; GCS persistence; Gemini LLM reward.
+
+**Outside this file:** HuggingFace Whisper pipeline (second framework); AfriSpeech **M-WER / M-CER** from gold entity spans (not wired); automatic multi-seed aggregation; peak GPU memory / RTF in JSON; “best val WER” checkpoint selection (currently last epoch); narrative comparison to published AfriSpeech baselines (your writing).
 
 ---
 
@@ -187,7 +266,7 @@ python nemo_afrispeech_training.py --stage both --dataset voxpopuli \
 
 | Setup | Spot $/hr (approx.) |
 |-------|------------------------|
-| n1-standard-8 + A100 | ~$1.50 |
+| a2-highgpu-1g (1× A100 40GB) | ~$2–4 (region/pricing varies) |
 | n1-standard-8 + V100 | ~$0.80 |
 
 **GCS:** ~$0.020/GB-month standard; keep `.nemo` + JSON only for low cost.
@@ -196,7 +275,10 @@ python nemo_afrispeech_training.py --stage both --dataset voxpopuli \
 
 ## Troubleshooting
 
+- **`n1-standard-*` + A100 “not compatible”:** switch to `a2-highgpu-1g` and drop `--accelerator` (A100 is tied to A2 shapes). Or keep N1 and use V100/T4.
 - **OOM:** reduce batch size in `Config` / add CLI override (future) or edit `BATCH_SIZE` in script.
 - **Preemption:** rely on GCS uploads per stage; restart VM and continue from saved `.nemo`.
 - **AfriSpeech streaming slow:** first streaming pass filters clinical; manifests cache WAVs under `OUTPUT_DIR/audio`.
 - **`gsutil` not found:** install Google Cloud SDK or use `gcloud storage cp` (newer).
+- **SSH `Connection refused`:** wait for first-boot + NVIDIA driver install (see SSH section); use serial port output above. Not the same as “permission denied” (keys) or timeout (firewall / wrong IP).
+- **Boot disk larger than image (e.g. 200GB):** Ubuntu on GCP usually expands the root filesystem on first boot; if `df -h` still shows ~100GB, follow [resize persistent disk](https://cloud.google.com/compute/docs/disks/add-persistent-disk#resize_pd) / grow the partition once.
