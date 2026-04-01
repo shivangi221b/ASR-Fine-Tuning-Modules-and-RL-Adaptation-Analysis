@@ -1,0 +1,13 @@
+# NeMo SFT + reward training (GPU)
+nemo_toolkit[asr]>=2.0.0
+lightning>=2.0.0
+torch
+datasets>=2.14.0
+soundfile
+librosa
+jiwer
+pandas
+numpy
+omegaconf
+# Optional: real LLM rewards
+google-generativeai>=0.8.0
