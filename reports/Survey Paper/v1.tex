@@ -1,0 +1,752 @@
+\documentclass[conference]{IEEEtran}
+
+% Packages
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+% Title and authors
+\title{A Comprehensive Survey of Reinforcement Learning Frameworks for Speech-to-Text Systems}
+
+\author{
+\IEEEauthorblockN{Gautam Agarwal}
+\IEEEauthorblockA{\textit{Department of Computer Sciences} \\
+\textit{Columbia University}\\
+New York, USA \\
+ga2726@columbia.edu}
+}
+
+\author{
+\IEEEauthorblockN{Gautam Agarwal}
+\IEEEauthorblockA{\textit{Department of Computer Sciences} \\
+\textit{Columbia University}\\
+New York, USA \\
+ga2726@columbia.edu}
+}
+
+\author{
+\IEEEauthorblockN{Gautam Agarwal}
+\IEEEauthorblockA{\textit{Department of Computer Sciences} \\
+\textit{Columbia University}\\
+New York, USA \\
+ga2726@columbia.edu}
+}
+
+\author{
+\IEEEauthorblockN{Gautam Agarwal}
+\IEEEauthorblockA{\textit{Department of Computer Sciences} \\
+\textit{Columbia University}\\
+New York, USA \\
+ga2726@columbia.edu}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+% Problem statement: need for robust RL-based post-training for speech models under distribution drift
+% Survey scope: 10 prominent RL/RLHF frameworks + empirical evaluation on STT benchmarks
+% Key findings: framework capabilities, empirical performance on speech tasks, critical gaps for production STT
+% Contribution: comprehensive comparison, empirical benchmarking, gap analysis with design recommendations
+\end{abstract}
+
+\begin{IEEEkeywords}
+Reinforcement Learning, RLHF, Speech-to-Text, Continual Learning, Survey, Self-Adaptive Systems
+\end{IEEEkeywords}
+
+\section{Introduction}
+% Motivation: distribution drift in production STT (accents, noise, domains)
+% Why RL/RLHF for STT: reward-based optimization for WER/CER, potential for continual adaptation
+% Research questions:
+%   - What RL/RLHF frameworks exist and what do they offer?
+%   - How do they perform when adapted to STT tasks?
+%   - What gaps prevent their use in production speech self-learning?
+% Survey methodology: framework selection, comparison taxonomy, experimental protocol
+% Paper organization
+% Contributions:
+%   - Comprehensive survey of 10 RL/RLHF frameworks
+%   - First empirical comparison on STT benchmarks (7 datasets, multiple drift scenarios)
+%   - Gap analysis with actionable design recommendations for speech researchers
+
+\subsection{Motivation}
+% Distribution drift in production STT systems
+% Challenges: accents, noise, domains, catastrophic forgetting
+
+\subsection{Research Questions}
+% RQ1: What RL/RLHF frameworks exist and what capabilities do they provide?
+% RQ2: How do these frameworks perform when adapted to STT tasks?
+% RQ3: What gaps prevent their deployment in production speech self-learning scenarios?
+
+\subsection{Survey Methodology}
+% Framework selection criteria
+% Comparison taxonomy (6 axes)
+% Experimental protocol
+
+\subsection{Contributions}
+% 1. Comprehensive survey of 10 frameworks
+% 2. First empirical evaluation on STT benchmarks
+% 3. Evidence-based gap analysis
+% 4. Design recommendations for future work
+
+\subsection{Paper Organization}
+% Brief roadmap of sections
+
+\section{Background and Preliminaries}
+\label{sec:background}
+
+This section establishes the conceptual and technical foundations for the survey. We begin by introducing reinforcement learning from human feedback (RLHF) and reinforcement learning from verifiable rewards (RLVR), the two primary paradigms for post-training alignment of generative models. We then describe a generic RL post-training pipeline that abstracts common architectural components across frameworks, providing a reference architecture for subsequent comparisons. Next, we review speech-to-text fundamentals—model architectures, evaluation metrics, and production deployment challenges—to contextualize the gap analysis in Section~\ref{sec:gaps}. Finally, we define the six-dimensional comparison taxonomy that structures our survey, explaining the rationale for each dimension and its relevance to framework selection.
+
+\subsection{RLHF and RLVR Fundamentals}
+
+Reinforcement learning from human feedback (RLHF) has emerged as the dominant paradigm for aligning large language models with human preferences, safety constraints, and task-specific objectives~\cite{instructgpt-paper, anthropic-hh-paper}. The core insight is that many desirable model behaviors—such as helpfulness, harmlessness, factual accuracy, and stylistic preferences—are difficult to specify via supervised examples alone but can be elicited through preference comparisons: given two model outputs, humans can reliably indicate which is better, even when they cannot easily generate the better output themselves. RLHF leverages these preferences to train models that maximize human-judged quality.
+
+\textbf{The RLHF Pipeline.} The standard RLHF workflow, popularized by InstructGPT~\cite{instructgpt-paper}, consists of three stages. \textit{Stage 1: Supervised Fine-Tuning (SFT)} initializes the policy by fine-tuning a pretrained language model on a curated dataset of high-quality instruction-response pairs, teaching the model to follow instructions and generate coherent responses. \textit{Stage 2: Reward Model Training} collects human preferences over pairs of model outputs—typically by sampling multiple responses to the same prompt and asking annotators to rank them—and trains a reward model $r_\phi(x, y)$ that predicts human preference scores. The reward model is typically a pretrained LLM with a scalar output head, optimized using a pairwise ranking loss such as the Bradley-Terry model: given preferred response $y_w$ and dispreferred response $y_l$ for prompt $x$, the loss is
+\[
+\mathcal{L}_{\text{RM}} = -\mathbb{E}_{(x, y_w, y_l)} \left[ \log \sigma(r_\phi(x, y_w) - r_\phi(x, y_l)) \right]
+\]
+where $\sigma$ is the sigmoid function. \textit{Stage 3: RL Fine-Tuning} uses the reward model to optimize the policy $\pi_\theta$ via reinforcement learning, typically using Proximal Policy Optimization (PPO). The objective combines the expected reward with a KL divergence penalty toward the SFT model $\pi_{\text{SFT}}$ to prevent the policy from drifting too far from the supervised initialization and producing degenerate outputs that exploit reward model weaknesses:
+\[
+\mathcal{J}(\theta) = \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta(\cdot|x)} \left[ r_\phi(x, y) \right] - \beta \cdot D_{\text{KL}}(\pi_\theta \| \pi_{\text{SFT}})
+\]
+where $\beta$ is a hyperparameter controlling the strength of the KL penalty, and $\mathcal{D}$ is the prompt distribution.
+
+\textbf{PPO for RLHF.} PPO optimizes the policy by iteratively collecting trajectories (prompt-response pairs) under the current policy, computing advantages using a learned value function $V_\psi(x)$, and updating parameters to maximize a clipped surrogate objective:
+\[
+\mathcal{L}_{\text{PPO}}(\theta) = \mathbb{E}_t \left[ \min\left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]
+\]
+where $r_t(\theta) = \frac{\pi_\theta(a_t | s_t)}{\pi_{\theta_{\text{old}}}(a_t | s_t)}$ is the importance sampling ratio, $\hat{A}_t$ is the estimated advantage, and $\epsilon$ is the clipping parameter (typically 0.2). The clipping prevents excessively large policy updates that could destabilize training. The value function is trained alongside the policy to minimize temporal difference errors:
+\[
+\mathcal{L}_{\text{V}}(\psi) = \mathbb{E}_t \left[ (V_\psi(s_t) - \hat{R}_t)^2 \right]
+\]
+where $\hat{R}_t$ is the empirical return.
+
+\textbf{Alternative On-Policy Algorithms.} Recent work has introduced variants that address PPO's limitations. GRPO (Group Relative Policy Optimization) computes advantages relative to a group of sampled trajectories rather than using a learned critic, reducing variance and eliminating the need for accurate value function training~\cite{grpo-paper}. RLOO (REINFORCE Leave-One-Out) uses leave-one-out baselines within batches, providing lower-variance gradient estimates without critic networks~\cite{rloo-paper}. REINFORCE++ incorporates reward normalization, advantage clipping, and adaptive KL scheduling to improve stability~\cite{reinforce-plus-paper}.
+
+\textbf{Offline Preference Optimization.} Direct Preference Optimization (DPO) and related methods bypass the reward model and RL stages, optimizing policies directly on preference data~\cite{dpo-paper}. DPO reparameterizes the RLHF objective to derive a closed-form preference loss:
+\[
+\mathcal{L}_{\text{DPO}}(\theta) = -\mathbb{E}_{(x, y_w, y_l)} \left[ \log \sigma\left( \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)} \right) \right]
+\]
+This directly increases the likelihood of preferred responses while decreasing dispreferred ones, controlled by temperature $\beta$. DPO is computationally efficient (training in one stage rather than three) but is limited to offline preference datasets and cannot incorporate online exploration or verifiable rewards.
+
+\textbf{Reinforcement Learning from Verifiable Rewards (RLVR).} In domains where correctness can be objectively determined—such as code generation (unit test pass rates), mathematical reasoning (symbolic checkers), or structured data extraction (schema validation)—RLVR replaces learned reward models with verifiable reward functions $r(x, y) \in \{0, 1\}$ or $r(x, y) \in [0, 1]$ computed by executing outputs and checking correctness~\cite{codex-paper, minerva-paper}. RLVR eliminates reward model training overhead, provides dense and reliable feedback, and scales naturally to domains where human annotation is expensive or infeasible. However, it requires environments that can safely execute generated outputs and computationally efficient verification procedures.
+
+\textbf{Multi-Turn and Agentic Extensions.} Recent RLHF work extends beyond single-turn generation to multi-turn dialogues and tool-using agents~\cite{toolformer-paper, react-paper}. In these settings, models interact with environments (APIs, code interpreters, search engines) over multiple steps, receiving intermediate rewards and observations. The RL objective becomes an episodic return over trajectories $\tau = (s_0, a_0, r_0, \ldots, s_T, a_T, r_T)$, and algorithms must handle credit assignment over long horizons and partial observability.
+
+\subsection{Generic RL Post-Training Pipeline}
+
+Despite architectural differences across frameworks, most RL post-training systems share a common high-level pipeline comprising six primary components. Understanding this generic architecture clarifies how frameworks make different trade-offs in implementing each component.
+
+\textbf{1. Policy Model.} The policy $\pi_\theta$ is the generative model being optimized—typically a large language model, vision-language model, or (in our STT context) an acoustic model or encoder-decoder architecture. The policy is initialized from a pretrained checkpoint or SFT model and updated iteratively during RL training. In distributed settings, the policy may be sharded across multiple GPUs using tensor parallelism, pipeline parallelism, or expert parallelism (for MoE models).
+
+\textbf{2. Reward Source.} The reward source provides scalar feedback $r(x, y)$ for generated outputs. In RLHF, this is a learned reward model $r_\phi(x, y)$ trained on human preferences; the reward model is typically frozen during RL training to prevent co-adaptation. In RLVR, the reward source is a verifiable function that executes or validates outputs (e.g., running unit tests, checking mathematical equivalence, computing WER/CER against ground truth). Some systems support multiple reward sources for multi-objective optimization, combining learned and verifiable rewards.
+
+\textbf{3. Reference Model.} The reference model $\pi_{\text{ref}}$ is a frozen copy of the initial policy (typically the SFT model) used to compute KL divergence penalties $D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})$. This penalty prevents the policy from drifting arbitrarily far from the reference distribution, maintaining linguistic coherence and preventing reward hacking. The reference model must be queryable during training to compute log-probabilities for generated tokens. In memory-constrained settings, the reference model may share weights with the policy and be reconstructed by temporarily disabling adapters (in LoRA-based training).
+
+\textbf{4. Rollout Engine.} The rollout engine generates experience by sampling prompts from a dataset, running the current policy to produce responses, and computing rewards. Rollout is inference-bound: it requires high-throughput token generation but no gradient computation. Modern rollout engines (vLLM, SGLang) optimize for throughput via techniques like PagedAttention (efficient KV cache management), continuous batching (dynamically adding/removing requests), and tensor parallelism. Rollout can be synchronous (waiting for training to complete before generating new batches) or asynchronous (continuously generating using slightly stale policies).
+
+\textbf{5. Trainer.} The trainer consumes trajectories from the rollout engine, computes policy gradients using an RL algorithm (PPO, GRPO, DPO), and updates model parameters. Training is compute-bound: it requires backpropagation, gradient accumulation, and optimizer steps but relatively little memory for activations (compared to rollout's KV caches). Trainers leverage ZeRO, FSDP, or Megatron for memory-efficient distributed training, and may use gradient checkpointing, mixed precision, and FlashAttention to fit large models.
+
+\textbf{6. Data Buffer / Replay.} The data buffer stores trajectories between rollout and training, handling batching, shuffling, and (in some systems) experience replay. In standard on-policy RLHF, buffers are short-lived: trajectories are collected, used for a few training epochs, then discarded. In off-policy or continual learning settings, buffers persist longer, mixing recent trajectories with historical data to stabilize training or prevent catastrophic forgetting. Replay buffers are particularly important for asynchronous systems, where they queue trajectories from many rollout workers for consumption by training workers.
+
+\textbf{Pipeline Coordination.} The coordination pattern determines how these components interact. Synchronous pipelines alternate discrete rollout and training phases: collect a batch of trajectories, train for $K$ gradient steps, repeat. Asynchronous pipelines run rollout and training concurrently, with training consuming whatever data is available in the buffer. Dataflow-based systems (e.g., verl) represent pipelines as DAGs where nodes are components and edges are data dependencies, enabling automatic parallelization and complex multi-model workflows.
+
+Figure~\ref{fig:generic-pipeline} illustrates this generic architecture. While all surveyed frameworks instantiate this pattern, they differ in: rollout engine choice (vLLM vs SGLang vs native HF), training backend (DeepSpeed vs FSDP vs Megatron), degree of decoupling (coupled Hybrid Engine vs fully decoupled Ray services), and buffer sophistication (simple queues vs replay with prioritization).
+
+\subsection{Speech-to-Text Specifics}
+
+Speech-to-text systems present unique challenges and requirements that distinguish them from text-only LLM alignment, motivating speech-specific frameworks and evaluation protocols.
+
+\textbf{Model Architectures.} Modern STT models fall into three primary families. \textit{Encoder-decoder models} such as Whisper~\cite{whisper-paper} use a Transformer encoder to process mel-spectrogram features and a Transformer decoder to generate transcripts autoregressively, supporting multilingual and multitask training (transcription, translation, language identification). Whisper models range from 39M (tiny) to 1.5B (large-v3) parameters and are pretrained on 680,000 hours of weakly supervised web data, achieving robust zero-shot performance across accents and noise conditions. \textit{Encoder-only models with CTC} such as Wav2Vec2~\cite{wav2vec2-paper} use self-supervised pretraining on unlabeled speech followed by fine-tuning with Connectionist Temporal Classification (CTC) loss, which aligns input frames to output tokens via dynamic programming. Wav2Vec2 models range from 95M (base) to 317M (large) parameters and excel at low-resource languages due to self-supervised pretraining. \textit{End-to-end Conformer models}~\cite{conformer-paper} combine convolutional layers for local feature extraction with Transformer self-attention for long-range dependencies, optimizing the speed-accuracy trade-off for production deployment.
+
+\textbf{Evaluation Metrics.} STT quality is primarily measured by Word Error Rate (WER) and Character Error Rate (CER), computed via edit distance between hypothesis and reference transcripts:
+\[
+\text{WER} = \frac{S + D + I}{N} \times 100\%
+\]
+where $S$, $D$, $I$ are substitutions, deletions, and insertions, and $N$ is the total number of words in the reference. Lower WER/CER indicates better accuracy. Domain-specific metrics include \textit{verb error rate} (critical for clinical or legal domains where action verbs carry high semantic weight), \textit{named entity error rate} (measuring accuracy on person names, locations, medical terms), and \textit{diarization error rate} (DER) for multi-speaker scenarios. Efficiency metrics include \textit{Real-Time Factor} (RTF: processing time divided by audio duration, with RTF < 1 required for real-time applications) and latency percentiles (p50, p95, p99 end-to-end latency).
+
+\textbf{Production Challenges.} Deployed STT systems face several challenges absent in offline LLM benchmarks. \textit{Domain drift} occurs when production audio differs from training data: accents shift as user demographics change, background noise varies by environment (office, street, vehicle), and vocabulary evolves with new products or terminology. \textit{Streaming constraints} require models to produce partial transcripts with low latency (< 200ms) rather than waiting for complete utterances, necessitating different decoding strategies and metrics (e.g., streaming WER). \textit{Catastrophic forgetting} arises when fine-tuning on new domains degrades performance on previously learned domains, particularly problematic for STT services handling diverse accents and topics. \textit{Cost-performance trade-offs} are acute in STT: processing millions of audio minutes per day requires careful balancing of model size, quantization, batching, and hardware provisioning to meet latency and cost SLAs.
+
+\textbf{Continual Learning in Speech.} Unlike text LLMs where new data is often similar to existing pretraining distributions, STT systems encounter structured distribution shifts: clean read speech → noisy conversational speech → accented spontaneous speech. Sequential adaptation protocols that maintain performance across this progression without forgetting early domains require replay strategies, backward-transfer metrics, and domain-aware sampling—capabilities largely absent from existing RL frameworks.
+
+\subsection{Comparison Taxonomy}
+
+We structure the survey around six dimensions that capture the most salient differences among RL frameworks and their suitability for various deployment scenarios. This taxonomy emerged from analyzing common practitioner questions: "Which framework scales to my model size?" (parallelism), "Does it support my preferred algorithm?" (algorithmic coverage), "Can I plug in domain-specific rewards?" (data and reward plumbing), "Will it work for long-running production deployments?" (continual learning readiness), and "Does it handle my modality?" (modality focus).
+
+\textbf{1. System Architecture.} This dimension captures how frameworks decompose the RL pipeline into components and coordinate their execution. Key distinctions include: coupled versus decoupled rollout and training; synchronous versus asynchronous execution; monolithic versus microservice-based orchestration; and imperative (sequential code) versus declarative (dataflow graphs) coordination. Architecture determines deployment complexity, operational flexibility, and ease of debugging.
+
+\textbf{2. Algorithmic Coverage.} The range of supported RL algorithms—PPO, DPO, GRPO, ILQL, multi-agent methods, offline RL—determines which alignment strategies are accessible. Broader coverage enables algorithmic exploration and comparison but may come at the cost of more complex APIs and less optimized implementations. This dimension also captures support for RLHF versus RLVR and single-turn versus multi-turn agents.
+
+\textbf{3. Parallelism and Scale.} The maximum model sizes, dataset scales, and cluster configurations supported determine whether frameworks can train frontier models or are limited to research-scale experiments. Key factors include: tensor, pipeline, data, and expert parallelism support; memory optimization techniques (ZeRO, FSDP, gradient checkpointing); and maximum demonstrated model size (1B, 13B, 70B, 175B+). Scale also encompasses rollout throughput (samples/second) and training efficiency (GPU-hours to target accuracy).
+
+\textbf{4. Data and Reward Plumbing.} The abstractions for defining tasks, datasets, reward functions, and environments affect how easily frameworks adapt to new domains. Flexible reward APIs enable custom metrics, multi-objective optimization, and integration with external verifiers. Environment abstractions determine whether frameworks support only text generation or can handle multi-turn interactions, tool use, or multi-modal inputs.
+
+\textbf{5. Continual / Online Learning Readiness.} This dimension assesses whether frameworks are designed for finite training jobs (train once, deploy) versus long-running services that adapt continuously to new data. Relevant features include: replay buffer support, drift detection and mitigation, adaptive scheduling of retraining, AB testing and rollback mechanisms, and operational monitoring/alerting. Most surveyed frameworks prioritize offline training; readiness for continual learning emerges as a critical gap for production speech systems.
+
+\textbf{6. Modality Focus.} Whether frameworks assume text tokens, support multi-modal inputs (vision, speech, structured data), or provide domain-agnostic substrates determines their applicability to STT and other non-text domains. Text-centric frameworks bake in assumptions about discrete token actions, autoregressive generation, and language-specific metrics (perplexity, BLEU) that do not transfer to speech. Adapting such frameworks to STT requires significant engineering to define appropriate observations (spectrograms, embeddings), actions (CTC alignments, token sequences), and rewards (WER, CER, domain-specific penalties).
+
+These six dimensions provide a structured lens for comparing frameworks in Table~\ref{tab:framework-comparison} and identifying gaps for speech-specific self-learning systems in Section~\ref{sec:gaps}.
+
+
+\subsection{Experimental Setup Overview}
+% Datasets, baseline models, adaptation strategy
+% Evaluation protocol preview
+
+\section{Survey of RL and RLHF Frameworks}
+
+This section presents a comprehensive survey of ten prominent reinforcement learning frameworks spanning the spectrum from general-purpose RL libraries to specialized RLHF systems designed for large language model alignment. We organize these frameworks into four categories based on their architectural philosophy, target use cases, and design priorities.
+
+The first category comprises \textbf{full-stack RLHF systems} (verl, OpenRLHF, slime, Miles, DeepSpeed-Chat) that provide end-to-end solutions for LLM post-training, integrating distributed rollout engines, training backends, and complete RLHF pipelines with optimizations for models ranging from 1.3B to 175B+ parameters. These systems represent production-grade or near-production implementations designed to scale ChatGPT-like alignment workflows across multi-node GPU clusters. The second category consists of \textbf{asynchronous and distributed RL systems} (AReaL), which decouple experience generation from policy optimization to maximize throughput in scenarios where inference latency dominates training time. The third category encompasses \textbf{research-oriented RLHF libraries} (TRL, TRLX, RL4LMs) that prioritize ease of experimentation, modular design, and integration with popular machine learning ecosystems such as Hugging Face Transformers, enabling rapid prototyping of alignment algorithms and reward functions. Finally, we examine \textbf{general-purpose RL libraries} (Ray RLlib) that provide domain-agnostic RL infrastructure applicable to robotics, game playing, and control tasks, offering a baseline for understanding what speech-specific frameworks must add beyond generic RL capabilities.
+
+For each framework, we analyze its core architectural components, the range of fine-tuning and RL strategies it enables, its scalability characteristics, and representative performance results from published benchmarks. This structured analysis establishes the foundation for our subsequent comparative analysis (Section~\ref{sec:comparison}) and empirical evaluation (Section~\ref{sec:experiments}).
+
+\subsection{Full-Stack RLHF Systems for LLMs}
+
+Full-stack RLHF systems provide end-to-end infrastructure for training, deploying, and scaling reinforcement learning from human feedback pipelines on large language models. These frameworks integrate multiple subsystems—distributed training backends (FSDP, Megatron, DeepSpeed), high-throughput rollout engines (vLLM, SGLang), reward computation, and orchestration logic—into unified platforms that support the complete InstructGPT-style alignment workflow from supervised fine-tuning through PPO-based or DPO-based policy optimization. We survey five representative systems in this category: verl, a flexible dataflow-based framework supporting both RLHF and RLVR with extensive algorithm coverage; OpenRLHF, a Ray-based system emphasizing agent execution patterns and hybrid engine optimization; slime, a minimalist three-module architecture prioritizing simplicity and hackability; Miles, an enterprise-focused fork of slime optimized for Mixture-of-Experts models and train-inference consistency; and DeepSpeed-Chat, Microsoft's reference implementation of the InstructGPT pipeline with the Hybrid Engine for unified training and inference. While these frameworks share common goals of scaling RLHF to tens or hundreds of billions of parameters, they differ significantly in their architectural philosophies, parallelism strategies, and target deployment scenarios, ranging from research prototyping to production services handling millions of queries per day.
+
+\subsubsection{verl}
+
+verl (Volcano Engine Reinforcement Learning) is a flexible, production-grade RL training library for large language models, originally developed as the HybridFlow RLHF framework and maintained by the ByteDance Seed team~\cite{verl-github, verl-paper}. Its design philosophy centers on composable dataflow abstractions that represent RL workflows as graphs of interconnected model services, enabling complex multi-model pipelines for RLHF, RLVR, and agentic tasks.
+
+\textbf{Core Architecture and Modules.} verl's architecture comprises four primary components. First, its \textit{training backends} support FSDP, FSDP2, and Megatron-LM, providing tensor parallelism, data parallelism, pipeline parallelism, and expert parallelism (for MoE models) to scale training across multi-node clusters. Second, its \textit{rollout backends} integrate vLLM, SGLang, and Hugging Face Transformers for high-throughput experience generation, with support for tensor parallelism, continuous batching, and multi-turn trajectories with tool calls. Third, the \textit{hybrid-controller dataflow engine} represents RL workflows as composable graphs where nodes are model services (policy, reward model, reference model, critic, environment) and edges define data dependencies, enabling flexible pipeline construction for diverse RL algorithms. Fourth, the \textit{verl-recipe library}—a separate repository—provides end-to-end training recipes with tuned hyperparameters for benchmarks in mathematical reasoning (GSM8K, MATH), code generation (MBPP, HumanEval), and agentic tasks.
+
+Beyond the core framework, verl includes experimental modules for asynchronous and off-policy training, such as one-step off-policy algorithms and verl-tool/verl-agent extensions for multi-turn, tool-using agents that interact with code execution environments, search APIs, SQL databases, and vision tools~\cite{verl-tool-paper}.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} verl supports an extensive range of post-training algorithms. For supervised stages, it provides standard SFT implementations. For RL-based alignment, it implements on-policy algorithms including PPO, GRPO (Group Relative Policy Optimization), GSPO, ReMax, REINFORCE++, RLOO (REINFORCE Leave-One-Out), PRIME, DAPO, DrGRPO, KL\_Cov, Clip\_Cov, and PF-PPO (Past-Future PPO with replay)~\cite{verl-paper, verl-github}. The framework distinguishes between RLHF (reward models trained on human preferences) and RLVR (verifiable reward functions such as unit test pass rates for code or symbolic math checkers), providing first-class support for both paradigms. Multi-turn and agentic workflows are enabled through verl-tool and verl-agent, extending RLVR to multi-step trajectories where agents use tools and receive verifiable rewards at episode termination~\cite{verl-tool-paper}.
+
+For efficiency, verl supports multi-GPU LoRA-based RL, sequence packing, FlashAttention-2 integration, and Liger kernels for long-context training, reducing memory footprint while maintaining training throughput.
+
+\textbf{Scalability and Performance.} verl scales to models exceeding 70B parameters through its support for 3D parallelism (tensor, pipeline, data) and expert parallelism for MoE architectures. The verl-recipe library reports competitive results on standard benchmarks: for example, PPO-trained models achieve improvements on GSM8K mathematical reasoning tasks and HumanEval code generation, with training recipes providing reproducible configurations for cluster deployments. The hybrid rollout backend enables flexibility in choosing between vLLM (optimized for throughput via PagedAttention) and SGLang (optimized for complex prompting patterns and structured generation), allowing users to match the rollout engine to their task characteristics.
+
+\textbf{Ecosystem and Adoption.} verl integrates with the broader PyTorch ecosystem, supporting Hugging Face Transformers models, Megatron-LM checkpoints, and standard dataset formats. Its modular design allows researchers to plug in custom reward functions, environments, or RL algorithms without modifying core framework code. The separate verl-recipe repository lowers the barrier to entry by providing working examples and hyperparameter configurations validated on public benchmarks.
+
+\subsubsection{OpenRLHF}
+
+OpenRLHF is a high-performance, production-ready RLHF/RLVR framework that combines Ray for distributed orchestration, vLLM for efficient rollout generation, and DeepSpeed for memory-optimized training~\cite{openrlhf-paper, openrlhf-github}. Its design addresses the observation that RLHF training spends approximately 80\% of wall-clock time in experience generation, motivating tight integration between inference-optimized rollout engines and training-optimized backends.
+
+\textbf{Core Architecture and Modules.} OpenRLHF's architecture consists of five primary components. First, the \textit{Ray-based controller and scheduler} orchestrates distributed placement of the four core RLHF models—actor, critic, reward, and reference—across GPU clusters, supporting hybrid engine configurations where different models use different parallelism strategies and multiple reward models for multi-objective optimization. Second, \textit{vLLM rollout engines} provide high-throughput token generation using PagedAttention for efficient KV-cache management, tensor parallelism for large model inference, and continuous batching to maximize GPU utilization during experience collection. Third, \textit{DeepSpeed training backends} leverage ZeRO-3 for optimizer state partitioning, tensor and sequence parallelism for model sharding, optimizer offloading to CPU memory, and FlashAttention-2 for memory-efficient attention computation, enabling training of models exceeding 70B parameters. Fourth, the \textit{agent-based execution layer} provides a unified token-in/token-out abstraction for single-turn and multi-turn agents, decoupling the RL algorithm implementation from agent interaction patterns and enabling reuse of rollout infrastructure across PPO, REINFORCE variants, and offline methods. Fifth, \textit{CLI scripts and examples} offer end-to-end workflows for supervised fine-tuning, reward model training from preference data, PPO-based RLHF, and offline alignment methods such as DPO and rejection sampling~\cite{openrlhf-github}.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} OpenRLHF implements the complete alignment stack. For the supervised stage, it provides SFT trainers compatible with Hugging Face Transformers models. For reward modeling, it supports training from pairwise preference data using standard Bradley-Terry models. For RL-based alignment, it implements multiple on-policy algorithms including PPO with numerous implementation refinements (KL penalty scheduling, reward normalization, distributed advantage normalization, entropy bonuses), REINFORCE++, REINFORCE++-baseline, GRPO, RLOO, and DrGRPO~\cite{openrlhf-paper}. Beyond standard RLHF, the framework supports offline alignment methods—DPO (Direct Preference Optimization), KTO (Kahneman-Tversky Optimization), rejection sampling fine-tuning, conditional SFT, and iterative DPO for online preference learning. The agent execution layer enables custom reward functions and integration with external environments such as NeMo Gym for reasoning and tool-use tasks~\cite{openrlhf-paper}.
+
+\textbf{Scalability and Performance.} OpenRLHF demonstrates strong scaling characteristics, supporting models from 7B to 70B+ parameters with competitive training throughput. Reported experiments show 1.8–2.5× speedups over optimized DeepSpeed-Chat PPO baselines at equivalent model scales, attributable to better scheduling of rollout and training phases, reduced communication overhead through Ray's object store, and vLLM's inference optimizations~\cite{openrlhf-paper}. The hybrid engine approach—running vLLM for rollout and DeepSpeed for training within the same process—reduces memory movement and enables larger batch sizes compared to systems that treat rollout and training as separate services.
+
+\textbf{Ecosystem and Adoption.} OpenRLHF integrates tightly with the Ray ecosystem for distributed execution, the vLLM project for inference, and DeepSpeed for training, providing a cohesive toolchain for practitioners already using these components. Its agent-based abstractions and support for multi-reward scenarios position it well for complex alignment tasks beyond simple preference learning, such as safety-constrained optimization or multi-objective value alignment.
+
+
+\subsubsection{slime (SMILE)}
+
+slime is an LLM post-training framework for RL scaling developed at Tsinghua University, emphasizing architectural simplicity and hackability through a clean three-module design~\cite{slime-github, slime-blog}. The framework is SGLang-native and has powered production systems including GLM-4.x models and research projects such as P1 physics reasoners, RLVE, TritonForge, and various agentic RL applications.
+
+\textbf{Core Architecture and Modules.} slime decomposes RLHF workflows into three loosely coupled modules with well-defined interfaces. The \textit{training module} implements parameter updates using Megatron-LM, providing tensor parallelism, data parallelism, pipeline parallelism, mixed-precision training, and gradient accumulation for large-scale model training. The \textit{rollout module} handles experience generation through SGLang for high-performance inference and a router component for prompt sampling, response generation, and reward computation; rewards can be computed via arbitrary Python functions or external verifier calls such as compilers, math solvers, or LLM judges~\cite{slime-github}. The \textit{data buffer module} serves as the bridge between training and rollout, managing prompt initialization from datasets, storing generated samples and rewards, implementing sampling strategies for training batches, and coordinating the training-rollout loop through a configurable workflow controller.
+
+The three-module architecture with explicit interfaces enables researchers to modify any component independently—for example, replacing SGLang with vLLM, swapping Megatron for FSDP, or implementing custom reward functions—without deep systems engineering. This design philosophy prioritizes flexibility and transparency over integrated optimization, making slime particularly attractive for researchers exploring novel RL algorithms or reward formulations.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} slime supports both supervised fine-tuning and RL-based post-training. For SFT, the training module accepts standard instruction-tuning datasets and optimizes next-token prediction losses. For RL, the framework implements standard on-policy algorithms such as PPO, with rollout generation handled by SGLang and training handled by Megatron; the data buffer orchestrates the collection of on-policy samples and their consumption by the training loop~\cite{slime-github}. Reward functions are user-defined and can leverage verifiable signals (e.g., code execution results, math checkers) or learned reward models. The framework's blog posts and examples demonstrate applications to agentic training scenarios, multi-turn environments, and partial rollout techniques for reducing computational cost in long-horizon tasks~\cite{slime-blog}.
+
+\textbf{Scalability and Performance.} slime inherits Megatron-LM's scaling capabilities, supporting tensor and pipeline parallelism for models in the tens to hundreds of billions of parameters. SGLang provides high-throughput inference with optimizations including continuous batching, efficient memory management, and support for structured generation patterns. While slime does not report extensive benchmark comparisons in its documentation, its use in training GLM-4.x models—which achieve competitive performance on standard LLM benchmarks—demonstrates production readiness at scale~\cite{slime-github}.
+
+\textbf{Ecosystem and Adoption.} slime's clean modular boundaries and open-source availability have made it a popular choice for researchers building on top of existing RLHF infrastructure. Its SGLang-native design aligns well with projects requiring complex prompting, constrained generation, or integration with external tools during rollout. The framework's educational value—clearly separating concerns that are often entangled in monolithic systems—has contributed to its adoption in academic settings.
+
+
+\subsubsection{Miles}
+
+Miles is an enterprise-focused RL framework for large-scale LLM and VLM post-training, developed as a fork and evolution of slime with emphasis on Mixture-of-Experts (MoE) training, production robustness, and train-inference consistency~\cite{miles-blog, miles-github}. It addresses practical challenges encountered when deploying RLHF at scale, including memory stability, failure handling, and the train-inference mismatch problem that can destabilize on-policy algorithms.
+
+\textbf{Core Architecture and Modules.} Miles inherits slime's Algorithm-Data-Rollout-Eval modular architecture but extends it with several production-hardening features. The \textit{training backend} builds on FSDP and FSDP2 with enhancements for MoE models, including expert parallelism, memory margin management to prevent out-of-memory crashes, improved FSDP memory behavior through custom sharding strategies, and robust NCCL error propagation for multi-node stability~\cite{miles-blog}. The \textit{rollout subsystem} supports independent deployment and version management, allowing rollout services to run on separate infrastructure from training, with load balancing and fault tolerance for production workloads.
+
+A key innovation in Miles is \textit{true on-policy training} through train-inference consistency. The framework ensures that the policy used for rollout and the policy being trained produce bitwise-identical log-probabilities by aligning numerical precision, operator implementations, and parallelism strategies between SGLang (rollout) and FSDP (training). This effectively drives the KL divergence between rollout and training policies to zero, eliminating a source of instability in PPO that arises when the "old policy" used for importance sampling differs from the actual rollout policy due to quantization, operator differences, or stale parameters~\cite{miles-blog}.
+
+Miles also introduces \textit{speculative decoding with online draft model training}, where a smaller draft model generates candidate tokens during rollout and a larger target model verifies them, reducing latency by over 25\% compared to frozen draft models. The draft model is continuously updated via online SFT on samples from the target policy, maintaining alignment as the target policy evolves during RL training~\cite{miles-blog}.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} Miles supports the standard RLHF pipeline with SFT initialization, reward model training, and on-policy RL (primarily PPO and variants). Its algorithmic contributions lie less in novel RL algorithms and more in ensuring that existing algorithms work correctly at scale under production constraints. The emphasis on train-inference consistency is particularly relevant for algorithms like PPO that are sensitive to log-probability drift, while speculative decoding and online draft training reduce the computational overhead of rollout-intensive RL methods.
+
+\textbf{Scalability and Performance.} Miles is designed for very large models, including MoE architectures with hundreds of billions of activated parameters. The MoE-specific optimizations—expert parallelism, load balancing, and memory management—enable training of models like DeepSeek-V3-style sparse architectures where naive FSDP implementations would fail due to memory fragmentation or load imbalance. The framework's quantization-aware training supports INT4 and FP8 precision for both rollout and training, reducing memory footprint and increasing throughput while maintaining train-inference consistency at lower precision~\cite{miles-blog}.
+
+\textbf{Ecosystem and Adoption.} Miles represents a pragmatic evolution from research prototype (slime) to production system, addressing the "last mile" problems that prevent RLHF frameworks from handling real-world deployment scenarios. Its focus on observability—comprehensive metrics, analyzers, and profilers—and operational concerns such as gradual rollout, A/B testing, and rollback mechanisms reflects the requirements of enterprise LLM deployments serving millions of users.
+
+
+\subsubsection{DeepSpeed-Chat}
+
+DeepSpeed-Chat is Microsoft's end-to-end RLHF framework for training ChatGPT-like conversational models, built on the DeepSpeed ecosystem~\cite{deepspeed-chat-paper, deepspeed-chat-github}. It provides a reference implementation of the InstructGPT three-stage pipeline—supervised fine-tuning, reward model training, and PPO-based RLHF—with a novel Hybrid Engine that unifies training and inference optimizations.
+
+\textbf{Core Architecture and Modules.} DeepSpeed-Chat's architecture comprises four primary components. First, the \textit{three-stage RLHF pipeline} replicates the InstructGPT workflow: Step 1 fine-tunes a pretrained LLM (e.g., OPT-13B) on supervised instruction-following data; Step 2 trains a reward model (typically a smaller model like OPT-350M) on human preference rankings; and Step 3 optimizes the actor model against the reward model using PPO with KL regularization toward the Step 1 model~\cite{deepspeed-chat-paper}. Second, the \textit{Hybrid Engine (DeepSpeed-HE)} addresses the bottleneck of RLHF Stage 3, where training alternates between experience generation (inference-bound) and policy optimization (training-bound). The Hybrid Engine dynamically switches between DeepSpeed's high-performance inference kernels with tensor parallelism for the generation phase and ZeRO-based training with optimizer state partitioning for the PPO update phase, sharing memory allocations and avoiding data movement between modes~\cite{deepspeed-chat-github}. Third, \textit{data aggregation utilities} enable blending multiple datasets and splitting them across the three training stages with configurable sampling ratios. Fourth, \textit{one-click training scripts} provide end-to-end examples for OPT models ranging from 1.3B to 175B parameters, with automatic configuration of parallelism strategies and hyperparameters based on available hardware.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} DeepSpeed-Chat implements the canonical InstructGPT alignment flow. Step 1 SFT uses standard next-token prediction loss on instruction datasets. Step 2 reward modeling trains a classification head on top of a pretrained LLM to predict human preference rankings, using the Bradley-Terry model to convert pairwise comparisons into scalar rewards. Step 3 PPO-based RLHF optimizes the actor policy using rewards from the Step 2 model while maintaining KL divergence constraints relative to the Step 1 (SFT) model to prevent reward hacking and maintain linguistic quality~\cite{deepspeed-chat-paper}.
+
+DeepSpeed-Chat includes two optional enhancements to Stage 3. \textit{Exponential Moving Average (EMA)} maintains a slowly-updated copy of the policy for more stable reference probabilities in importance sampling. \textit{Mixture training} combines the PPO loss with a next-token prediction loss on pretraining or SFT data, preventing the model from degrading on capabilities not covered by the reward model, such as factual knowledge or domain-specific tasks~\cite{deepspeed-chat-github}.
+
+\textbf{Scalability and Performance.} DeepSpeed-Chat demonstrates strong scaling results across model sizes and hardware configurations. Training OPT-13B through all three RLHF stages requires approximately 9 hours on 8× A100-80GB GPUs (estimated cost ~\$290), OPT-30B completes in 18 hours on similar hardware, and OPT-175B finishes in under 24 hours on 64× A100-80GB GPUs~\cite{deepspeed-chat-paper}. Compared to reference implementations using PyTorch or Colossal-AI, DeepSpeed-Chat achieves 6–19× throughput improvements for Stage 3 PPO training, primarily due to the Hybrid Engine's elimination of model reloading and optimized memory management~\cite{deepspeed-chat-paper}.
+
+\textbf{Ecosystem and Adoption.} As a Microsoft Research project integrated with the broader DeepSpeed ecosystem, DeepSpeed-Chat benefits from tight integration with Azure infrastructure, comprehensive documentation, and active maintenance. Its one-click scripts and pre-configured examples lower the barrier to entry for practitioners seeking to replicate InstructGPT-style training on their own models and data. The framework's focus on OPT models—openly available pretrained checkpoints—enables reproducible research without requiring proprietary base models.
+
+
+\subsection{Asynchronous and Distributed RL Systems}
+
+While the full-stack RLHF systems described in the previous subsection primarily employ synchronous training paradigms—where policy updates wait for complete batches of on-policy trajectories—asynchronous RL systems decouple experience generation from policy optimization to maximize hardware utilization and training throughput. This design is particularly valuable in LLM RLHF scenarios where inference (rollout) is significantly slower than training (gradient computation), creating idle GPU time in synchronous pipelines. Asynchronous systems allow rollout workers to continuously generate trajectories using slightly stale policies while training workers consume available data without blocking, trading strict on-policy guarantees for substantial wall-clock speedups. However, this introduces algorithmic challenges: standard PPO assumes trajectories are collected from the current policy, and training on trajectories from outdated policies can destabilize learning. Asynchronous RL frameworks must therefore implement staleness-aware algorithms and carefully balance rollout and training rates to maintain convergence. We examine AReaL, a representative system that demonstrates the potential and challenges of asynchronous RLHF for language reasoning tasks.
+
+\subsubsection{AReaL}
+
+AReaL (Asynchronous Reinforcement Learning for Language Reasoning) is a large-scale asynchronous RL system designed specifically for training LLMs on reasoning-intensive tasks such as mathematical problem-solving and code generation~\cite{areal-paper}. Unlike traditional RLHF systems that tightly couple rollout and training in synchronous steps, AReaL prioritizes system-level efficiency through asynchrony, achieving substantial throughput improvements without introducing novel RL algorithms.
+
+\textbf{Core Architecture and Modules.} AReaL's architecture consists of three primary components operating concurrently with minimal synchronization. First, \textit{rollout workers}—independent processes or nodes equipped with GPUs for inference—continuously generate trajectories by sampling prompts from a dataset, running the current policy model to produce responses, and computing rewards through verifiable functions (e.g., executing generated code or checking mathematical solutions)~\cite{areal-paper}. Rollout workers operate autonomously without waiting for training to complete; they periodically fetch updated policy parameters from a shared parameter server but continue generating data using their local policy copy even as the global policy evolves. Second, \textit{training workers} consume trajectories from shared data queues or distributed buffers as soon as sufficient samples are available, computing policy gradients and updating model parameters using standard optimization algorithms. Training proceeds independently of rollout completion, processing whatever data is available rather than blocking until a fixed batch size is collected from the current policy. Third, a \textit{staleness-aware controller} monitors the age of trajectories in the training buffer—measured as the difference between the policy version that generated a trajectory and the current policy version being trained—and adjusts rollout and training throughput to prevent excessive staleness that could destabilize learning~\cite{areal-paper}.
+
+The system uses shared memory or distributed object stores (similar to Ray's plasma store) to avoid copying large model checkpoints and trajectory batches between processes, and implements lock-free data structures where possible to minimize synchronization overhead.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} AReaL primarily implements \textit{asynchronous PPO}, a staleness-enhanced variant of Proximal Policy Optimization adapted for asynchronous execution~\cite{areal-paper}. Standard PPO assumes that trajectories in a training batch were collected from the policy being updated (or a very recent version), and uses importance sampling to correct for the difference between the behavior policy (used for rollout) and the target policy (being optimized). In asynchronous settings, trajectories may be several policy updates old by the time they are consumed for training, violating PPO's assumptions.
+
+AReaL's staleness-aware PPO incorporates trajectory age into the importance sampling weights and adjusts clipping thresholds dynamically based on staleness. Specifically, the system tracks the policy version $\pi_{\theta_t}$ that generated each trajectory and the current training policy $\pi_{\theta_{t+k}}$ where $k$ represents the number of updates elapsed since generation. The importance ratio $r(\theta) = \frac{\pi_{\theta_{t+k}}(a|s)}{\pi_{\theta_t}(a|s)}$ is clipped more aggressively when $k$ is large, and trajectories exceeding a staleness threshold are discarded to prevent gradient noise from dominating training~\cite{areal-paper}. The controller adjusts rollout parallelism and training batch sizes to maintain staleness within acceptable bounds—typically allowing 2-5 policy updates of lag before discarding old samples.
+
+\textbf{Scalability and Performance.} AReaL demonstrates significant speedups over synchronous RLHF baselines on reasoning benchmarks. Experiments on mathematical reasoning tasks (GSM8K, MATH) and code generation (MBPP, HumanEval) show that asynchronous training achieves approximately 2.7× faster wall-clock time to reach target accuracy compared to synchronous PPO implementations with equivalent compute resources~\cite{areal-paper}. These gains arise from eliminating idle time: in synchronous systems, training GPUs wait for slow rollout workers to complete full batches, while rollout GPUs sit idle during training steps; AReaL keeps both subsystems active continuously.
+
+Importantly, AReaL achieves these speedups without significant degradation in final model quality. While some asynchronous RL methods in the literature suffer from reduced sample efficiency or convergence issues due to stale gradients, AReaL's staleness-aware algorithms and controller mitigate these effects, achieving final reward and accuracy metrics comparable to synchronous baselines despite using older trajectories~\cite{areal-paper}.
+
+The system scales to large models (up to 70B parameters reported in experiments) and high parallelism (dozens of rollout workers), with throughput scaling roughly linearly with the number of rollout nodes until training becomes the bottleneck.
+
+\textbf{Ecosystem and Adoption.} AReaL is positioned primarily as a research contribution demonstrating the viability of asynchronous RLHF for LLMs rather than as a production-ready framework with extensive tooling and documentation. Its insights—particularly the staleness-aware PPO variant and the empirical characterization of staleness-accuracy trade-offs—inform the design of other systems. For example, verl and OpenRLHF include experimental asynchronous modes inspired by similar principles, and practitioners deploying RLHF at scale increasingly consider asynchronous architectures to maximize GPU utilization.
+
+The main limitation of asynchronous approaches like AReaL is increased implementation complexity: managing distributed state, reasoning about consistency, and tuning staleness thresholds require more sophisticated engineering than synchronous pipelines. Additionally, asynchrony is most beneficial when rollout is much slower than training; for lightweight models or fast inference engines, the synchronization overhead may not justify the complexity. Nonetheless, AReaL establishes asynchronous RLHF as a practical and effective approach for scaling reasoning-focused LLM training.
+
+
+\subsection{Research-Oriented RLHF Libraries}
+
+Research-oriented RLHF libraries prioritize ease of experimentation, modular design, and rapid prototyping over production-scale deployment and maximum performance. Unlike full-stack systems that integrate optimized training backends, rollout engines, and orchestration into monolithic platforms, research libraries provide composable components—trainers, policies, reward abstractions, environment interfaces—that researchers can quickly assemble, modify, and extend to test new alignment algorithms, reward formulations, or task configurations. These frameworks typically integrate tightly with popular machine learning ecosystems such as Hugging Face Transformers, PyTorch, and standard dataset formats, minimizing boilerplate code and enabling researchers to focus on algorithmic innovations rather than distributed systems engineering. Trade-offs include reduced scalability compared to full-stack systems (often targeting single-node or small-cluster deployments), less aggressive optimization of memory and throughput, and limited production hardening. However, their lower complexity and better documentation make them ideal for academic research, ablation studies, and educational use cases. We examine three representative frameworks in this category: TRL, which provides lightweight RLHF trainers integrated with the Hugging Face ecosystem; TRLX, a large-scale evolution of TRL with distributed training capabilities; and RL4LMs, a modular framework emphasizing task diversity, rich reward abstractions, and reproducible benchmarking across NLP domains.
+
+\subsubsection{TRL (Transformer Reinforcement Learning)}
+
+TRL is a lightweight library developed by Hugging Face that exposes RL-based and preference-based alignment algorithms within the Transformers and Datasets ecosystem~\cite{trl-github, hf-rlhf-blog}. Its design philosophy emphasizes simplicity and accessibility, providing high-level trainer APIs that abstract away low-level RL implementation details while maintaining flexibility for customization.
+
+\textbf{Core Architecture and Modules.} TRL's architecture consists of four primary components. First, \textit{SFTTrainer} provides supervised fine-tuning on instruction datasets, handling tokenization, dataset formatting, and training loop management with minimal configuration~\cite{trl-github}. Second, \textit{DPOTrainer} implements Direct Preference Optimization, an offline alignment method that optimizes policies directly on preference pairs without requiring a separate reward model, using a contrastive loss that pushes up the likelihood of preferred responses while pushing down dispreferred ones~\cite{dpo-paper, trl-github}. Third, \textit{PPOTrainer} implements on-policy RLHF using Proximal Policy Optimization with value-head models—LLMs augmented with learned value functions via \texttt{AutoModelForCausalLMWithValueHead}—to estimate advantages and compute policy gradients with KL regularization toward a frozen reference model~\cite{trl-github}. Fourth, \textit{integration modules} provide seamless interoperability with Hugging Face Datasets for loading and processing training data, Transformers for model loading and inference, and the Hugging Face Hub for sharing checkpoints and metrics~\cite{trl-github}.
+
+TRL's trainers expose simple APIs: users provide a pretrained model, a dataset, a reward function (for PPO) or preference dataset (for DPO), and optional hyperparameters, and the trainer handles batching, optimization, logging, and checkpointing. This high-level interface significantly reduces the code required to implement RLHF experiments compared to building from scratch or using lower-level frameworks.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} TRL supports three primary alignment workflows. For supervised alignment, SFTTrainer fine-tunes models on instruction-response pairs using standard language modeling objectives. For preference-based offline alignment, DPOTrainer optimizes models on datasets of ranked responses (e.g., Anthropic HH-RLHF, OpenAI WebGPT comparisons) without requiring online rollouts or explicit reward models, using a $\beta$ parameter to control the trade-off between fitting preferences and staying close to the reference model~\cite{dpo-paper}. For online RLHF, PPOTrainer collects trajectories using the current policy, computes rewards using user-provided functions or external reward models (e.g., sentiment classifiers, toxicity detectors), estimates value functions and advantages, and updates the policy while constraining KL divergence from the reference model~\cite{trl-github}.
+
+TRL also includes experimental trainers for related methods such as RLOO (REINFORCE Leave-One-Out) and integration points for TRLX-style distributed training through compatible APIs.
+
+\textbf{Scalability and Performance.} TRL is designed for single-node or small-scale multi-GPU training, typically targeting models up to 7-13B parameters on consumer or small research cluster hardware. It supports standard PyTorch distributed data parallel (DDP) and integrates with the Accelerate library for automatic device placement and mixed-precision training, but does not provide advanced parallelism strategies like tensor parallelism, pipeline parallelism, or ZeRO-3 optimizer sharding~\cite{trl-github}. Performance optimizations focus on ease of use rather than maximum throughput: trainers use reasonable defaults for batch sizes, learning rates, and KL penalties, but users must manually tune hyperparameters for specific tasks.
+
+The library's strength lies in rapid experimentation: researchers report being able to run complete RLHF experiments from pretrained checkpoint to aligned model in under 100 lines of code, with training times ranging from hours (for 1-3B models on single GPUs) to days (for 7-13B models on small clusters)~\cite{trl-examples}.
+
+\textbf{Ecosystem and Adoption.} As an official Hugging Face library, TRL benefits from extensive documentation, integration with thousands of pretrained models on the Hub, and a large user community providing examples, tutorials, and troubleshooting support. Its simplicity makes it the de facto choice for educational RLHF tutorials, blog posts, and academic papers focusing on algorithmic contributions rather than systems engineering. However, practitioners deploying RLHF at production scale typically migrate to full-stack systems (verl, OpenRLHF) or TRLX once initial prototypes succeed, as TRL's scalability limitations become bottlenecks for larger models and datasets.
+
+
+\subsubsection{TRLX}
+
+TRLX (also referred to as AutoRLHF) is a large-scale RLHF framework developed by the EleutherAI and CarperAI communities as an evolution of TRL, designed to support distributed training of models up to and beyond 70B parameters~\cite{trlx-paper, trlx-blog}. While maintaining TRL's emphasis on ease of use and modularity, TRLX adds sophisticated parallelism strategies, memory optimizations, and offline RL algorithms to bridge the gap between lightweight research libraries and production-scale systems.
+
+\textbf{Core Architecture and Modules.} TRLX's architecture extends TRL's trainer paradigm with distributed execution capabilities. The \textit{distributed training stack} supports multiple parallelism modes: distributed data parallel (DDP) for replicating models across GPUs with gradient synchronization; model sharding for partitioning large models across devices when they exceed single-GPU memory; tensor parallelism for splitting individual layers across GPUs; pipeline parallelism for dividing models into stages with microbatching; and sequential parallelism for reducing activation memory in long-sequence training~\cite{trlx-paper}. These modes can be composed—for example, combining tensor parallelism within nodes and pipeline parallelism across nodes—to scale to very large models and clusters.
+
+The \textit{algorithm modules} provide implementations of PPO for online RLHF and Implicit Language Q-Learning (ILQL) for offline RL from logged data. ILQL is particularly notable as it enables training from preference datasets without requiring online rollouts, similar to DPO but using Q-learning rather than policy optimization, offering an alternative with different stability and sample efficiency characteristics~\cite{trlx-paper, ilql-paper}. The \textit{reward and environment APIs} allow users to define reward models trained on preference data or verifiable reward functions over text trajectories, with built-in support for common preference datasets like Anthropic HH-RLHF and OpenAI summarization comparisons~\cite{trlx-blog}.
+
+TRLX also integrates LoRA (Low-Rank Adaptation) and other parameter-efficient fine-tuning methods, enabling large-model RLHF on memory-constrained hardware by training only small adapter modules rather than full model parameters~\cite{trlx-paper}.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} TRLX supports two primary alignment paradigms. For online RLHF, the PPO implementation follows the standard workflow: initialize from an SFT checkpoint, collect on-policy rollouts using the current policy, compute rewards via a learned reward model or verifiable function, estimate advantages using a critic network, and update the policy with KL regularization toward a reference model~\cite{trlx-paper}. The distributed infrastructure enables this loop to scale to large models and high rollout parallelism.
+
+For offline RL, ILQL trains from logged datasets of trajectories with rewards (or preference rankings converted to rewards) without requiring online interaction. ILQL learns Q-values and value functions from the data, then extracts an improved policy by selecting actions with high Q-values, avoiding the instability of off-policy policy gradient methods~\cite{ilql-paper}. This approach is particularly valuable when online rollouts are expensive or unsafe, or when large high-quality preference datasets are available.
+
+TRLX's experiments demonstrate that both PPO and ILQL achieve competitive preference win-rates over baselines on summarization, helpfulness, and harmlessness tasks, with ILQL often matching PPO's performance at lower computational cost by avoiding online rollouts~\cite{trlx-paper}.
+
+\textbf{Scalability and Performance.} TRLX is designed for models ranging from 7B to 70B+ parameters, with reported experiments training 20B and 70B models using combinations of tensor parallelism and pipeline parallelism~\cite{trlx-blog}. The framework's distributed training infrastructure is built on top of DeepSpeed or Accelerate, inheriting their optimizations for communication, memory management, and numerical stability. Training times depend on model size and hardware but are generally comparable to other large-scale RLHF systems: for example, 20B parameter models can be trained on preference datasets in 1-2 days on clusters with 16-32 GPUs.
+
+TRLX's offline ILQL algorithm provides significant computational savings when applicable, as it eliminates the rollout phase entirely, training only on logged data. Experiments show ILQL achieving 80-90\% of online PPO's performance at approximately 50\% of the GPU-hours~\cite{trlx-paper}.
+
+\textbf{Ecosystem and Adoption.} TRLX occupies a middle ground between TRL (lightweight, single-node) and full-stack systems like verl or OpenRLHF (production-scale, highly optimized). It is widely used in the open-source LLM community for training models like Pythia, GPT-NeoX, and other EleutherAI/CarperAI research projects. Its integration with Hugging Face Transformers and standard dataset formats maintains TRL's ease of use while providing the scaling capabilities needed for frontier models. The framework is particularly popular among academic and nonprofit research groups that need to train large models but lack the engineering resources to build or maintain fully custom RLHF systems.
+
+
+\subsubsection{RL4LMs}
+
+RL4LMs (Reinforcement Learning for Language Models) is a modular RL library developed by the Allen Institute for AI, focused on benchmarking RLHF across diverse NLP tasks with rich reward abstractions and reproducible experimental protocols~\cite{rl4lms-github, rl4lms-paper}. Unlike frameworks centered on conversational alignment, RL4LMs emphasizes task diversity—spanning summarization, question answering, dialogue, machine translation, and more—and provides built-in support for over 20 reward functions and metrics, enabling systematic comparison of RL algorithms and reward formulations.
+
+\textbf{Core Architecture and Modules.} RL4LMs is structured around five primary components. First, the \textit{task and dataset registry} provides built-in support for seven NLP tasks: abstractive summarization (CNN/DailyMail, XSum), generative commonsense reasoning (CommonGen), sentiment-conditioned text continuation (IMDB), table-to-text generation (ToTTo), abstractive question answering (ELI5), machine translation (IWSLT), and conversational dialogue (DailyDialog, Persona-Chat), along with a \texttt{DataPoolRegistry} for adding custom tasks~\cite{rl4lms-github}. Second, the \textit{reward and metric library} includes over 20 evaluation functions: lexical metrics (ROUGE, BLEU, METEOR, chrF), semantic metrics (BERTScore, BLEURT), task-specific metrics (PARENT for table-to-text, CIDEr and SPICE for image captioning), classifier-based rewards (sentiment scores, toxicity detection), and synthetic rewards for controlled generation tasks~\cite{rl4lms-github}. Third, the \textit{text-generation environment} implements a Gym-style interface (\texttt{TextGenPool}, \texttt{Observation}, \texttt{RewardFunction}) that models text generation as a Markov Decision Process over token sequences, with vectorized parallel execution using \texttt{SubProcVecEnv} from Stable-Baselines3 to accelerate reward computation across multiple trajectories~\cite{rl4lms-github}.
+
+Fourth, the \textit{on-policy RL algorithms module} provides implementations of PPO, A2C, TRPO, and a novel Natural Language Policy Optimization (NLPO) algorithm adapted from Stable-Baselines3, all tailored to work with causal and encoder-decoder language model policies~\cite{rl4lms-paper}. Fifth, \textit{actor-critic policies} wrap Hugging Face Transformers models (GPT-2, GPT-Neo, T5, BART) with value heads for advantage estimation, including maskable variants for NLPO that respect token-level action spaces~\cite{rl4lms-github}.
+
+An \textit{on-policy trainer} orchestrates the outer loop: sampling rollouts from the environment using the current policy, computing rewards via the reward function, collecting batches for algorithm updates, and evaluating on held-out test sets. The entire pipeline is configurable via YAML files, enabling reproducible experiments with minimal code.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} RL4LMs supports both supervised baselines and RL-based optimization. For supervised training, models are fine-tuned on task datasets using standard next-token prediction or encoder-decoder objectives. For RL-based training, the framework implements four on-policy algorithms: PPO with clipped surrogate objectives and KL penalties; A2C (Advantage Actor-Critic) with entropy regularization; TRPO (Trust Region Policy Optimization) with conjugate gradient constraint satisfaction; and NLPO, which uses natural gradients and maskable action spaces for more stable policy updates on discrete token distributions~\cite{rl4lms-paper}.
+
+A key feature is \textit{adaptive KL control}: the framework dynamically adjusts KL penalty coefficients to maintain a target KL divergence from a reference policy, preventing catastrophic forgetting or excessive deviation from pretrained linguistic capabilities~\cite{rl4lms-github}. Rewards can be assigned at the token level (dense rewards for intermediate generation steps) or sequence level (sparse rewards based on complete outputs), with the environment handling temporal credit assignment.
+
+RL4LMs has been extensively validated through the GRUE benchmark (General Reinforcement Learning from Human Feedback Benchmark for Language), comprising over 2,000 experiments across tasks, algorithms, and reward functions, demonstrating reproducibility and providing baseline results for future research~\cite{rl4lms-paper}.
+
+\textbf{Scalability and Performance.} RL4LMs is designed for research-scale experiments, typically targeting models up to 3B parameters on single-node multi-GPU setups. The framework supports data parallelism via Stable-Baselines3's vectorized environments and standard PyTorch DDP, but does not implement advanced parallelism strategies like tensor or pipeline parallelism~\cite{rl4lms-github}. Training times range from hours for small models (GPT-2, 124M parameters) to days for larger models (GPT-Neo 2.7B) depending on the task and number of rollout workers.
+
+The framework's performance focus is on algorithm comparison rather than absolute throughput: experiments systematically compare PPO, A2C, TRPO, and NLPO across tasks, showing that algorithm choice and reward function design significantly impact final performance, with NLPO often providing better stability on token-level action spaces~\cite{rl4lms-paper}.
+
+\textbf{Ecosystem and Adoption.} RL4LMs integrates seamlessly with the Hugging Face ecosystem, supporting any Transformers-compatible model and standard dataset formats. Its value lies primarily in its comprehensive task and reward coverage, making it an ideal testbed for researchers exploring novel reward formulations, multi-task RL, or algorithmic improvements to RLHF. The GRUE benchmark provides standardized evaluation protocols and baseline results, facilitating fair comparisons across studies. While not designed for production deployment, RL4LMs' abstractions—particularly its reward and environment interfaces—offer architectural inspiration for building speech-specific or domain-specific RL frameworks, as its modular design clearly separates task definitions, reward computation, and algorithm implementation.
+
+
+\subsection{General-Purpose RL Libraries}
+
+General-purpose RL libraries provide domain-agnostic reinforcement learning infrastructure applicable across diverse problem domains including robotics, game playing, autonomous systems, resource optimization, and control tasks. Unlike the LLM-specific RLHF frameworks surveyed in previous subsections—which make architectural assumptions about discrete token actions, text-based observations, and reward models trained on human preferences—general-purpose libraries treat RL as a generic framework for sequential decision-making under uncertainty, providing flexible environment interfaces, broad algorithm coverage, and scalable execution substrates without domain-specific optimizations. These libraries typically implement classic RL algorithms (DQN, PPO, SAC, TD3) designed for continuous control, Atari games, and multi-agent scenarios, rather than the preference-based or verifiable-reward methods central to LLM alignment. However, they offer valuable infrastructure for researchers seeking to apply RL to new modalities or domains: their environment abstractions (Gymnasium, PettingZoo), policy architectures, and distributed execution patterns provide reusable components that can be adapted to speech, vision, or other generative tasks once appropriate observations, actions, and rewards are defined. We examine Ray RLlib, one of the most widely adopted general-purpose RL libraries, to understand what capabilities exist outside the LLM-centric ecosystem and what additional abstractions speech-specific frameworks must provide beyond generic RL infrastructure.
+
+\subsubsection{Ray RLlib}
+
+Ray RLlib is a production-grade, open-source RL library built on the Ray distributed computing framework, designed to support a wide range of algorithms, environments, and deployment scenarios across industries~\cite{rllib-paper, rllib-docs}. It is widely used for applications including HVAC control in data centers, industrial robotics, financial trading strategies, game AI, recommendation systems, and autonomous vehicle simulation, demonstrating versatility across domains with vastly different observation spaces, action spaces, and reward structures.
+
+\textbf{Core Architecture and Modules.} RLlib's architecture consists of five primary layers. First, the \textit{algorithm module} implements over 20 RL algorithms spanning multiple paradigms: on-policy algorithms (PPO, A2C/A3C, IMPALA, APPO for distributed asynchronous advantage actor-critic); off-policy algorithms (DQN, Rainbow, DDPG, TD3, SAC for continuous control); model-based RL (DreamerV3, MuZero); multi-agent RL with centralized training and decentralized execution; and offline RL methods for learning from logged datasets~\cite{rllib-docs}. Each algorithm is implemented as a modular class with configurable hyperparameters, loss functions, and training loops.
+
+Second, the \textit{environment and policy abstractions} provide flexible interfaces for defining problem domains. RLlib supports Gymnasium (formerly OpenAI Gym) for single-agent environments, PettingZoo for multi-agent scenarios, and custom vectorized environments for parallel rollouts. Policies can be parameterized as neural networks (CNNs for vision, MLPs for state vectors, RNNs for partial observability), custom models, or even non-neural heuristics, with support for shared backbones across multiple agents in multi-agent settings~\cite{rllib-docs}. Third, the \textit{execution layer} leverages Ray's distributed task and actor framework to scale rollout and training across clusters: environment runners collect experiences in parallel across many workers (potentially hundreds of nodes), while learner workers consume batches and perform gradient updates, with Ray's object store enabling efficient sharing of model parameters and trajectory data without centralized bottlenecks~\cite{rllib-paper}.
+
+Fourth, \textit{offline RL and replay utilities} enable learning from logged datasets or mixed online-offline scenarios. RLlib provides replay buffers with prioritized sampling, importance sampling corrections for off-policy data, and integration with datasets in standard formats (e.g., D4RL benchmarks)~\cite{rllib-docs}. Fifth, \textit{callbacks and customization APIs} allow users to inject custom logic at various points in the training loop—after environment steps, before policy updates, during evaluation—enabling advanced patterns like curriculum learning, dynamic reward shaping, and intervention-based debugging.
+
+\textbf{Fine-Tuning Strategies and Algorithmic Coverage.} RLlib does not use the term "fine-tuning" in the LLM sense; instead, it focuses on training policies from scratch or from pretrained checkpoints using standard RL objectives. The on-policy algorithms (PPO, A2C, IMPALA) optimize policies by collecting trajectories, computing advantages using value function estimates, and updating parameters with clipped surrogate losses or trust region constraints. Off-policy algorithms (DQN, SAC, TD3) learn Q-functions from replay buffers and derive policies by maximizing Q-values or using actor-critic architectures with entropy regularization for exploration~\cite{rllib-paper}.
+
+RLlib's multi-agent RL support enables training multiple policies simultaneously—either all agents sharing one policy (parameter sharing), each agent having independent policies (decentralized), or agents grouped by roles (e.g., team-based games). Centralized training with decentralized execution (CTDE) algorithms like MADDPG and QMIX are supported, where agents train using global state information but execute using only local observations~\cite{rllib-docs}.
+
+Offline RL algorithms enable training on logged data without environment interaction, useful for domains where online exploration is expensive, unsafe, or impossible (e.g., healthcare, robotics). RLlib implements behavior cloning, offline DQN variants, and conservative Q-learning methods that prevent overestimation on out-of-distribution actions~\cite{rllib-docs}.
+
+\textbf{Scalability and Performance.} RLlib is designed for production-scale deployments, supporting workloads ranging from single-machine prototyping to multi-node clusters with hundreds of GPUs. The library has been used to train policies in environments with millions of steps per second throughput, leveraging Ray's ability to schedule thousands of parallel environment workers across heterogeneous hardware~\cite{rllib-paper}. Performance optimizations include vectorized environment execution (batching multiple environment steps into single GPU kernels), asynchronous sampling and training (similar to AReaL's paradigm but generalized beyond LLMs), and optimized communication patterns that minimize synchronization overhead.
+
+RLlib provides built-in support for GPU acceleration, mixed-precision training, and gradient compression for distributed training. Benchmarks on standard tasks (Atari games, MuJoCo continuous control, multi-agent StarCraft) demonstrate competitive sample efficiency and wall-clock performance compared to specialized single-algorithm implementations, while offering significantly broader algorithm coverage in a unified codebase~\cite{rllib-paper}.
+
+\textbf{Ecosystem and Adoption.} As part of the Ray ecosystem—which includes Ray Tune for hyperparameter optimization, Ray Serve for model serving, and Ray Data for distributed data processing—RLlib benefits from tight integration across the machine learning lifecycle. Users can train policies with RLlib, tune hyperparameters with Ray Tune, and deploy trained policies as Ray Serve endpoints with minimal glue code. The library integrates with popular deep learning frameworks (PyTorch, TensorFlow) and model repositories, and supports exporting trained policies to ONNX or TorchScript for production inference.
+
+RLlib is widely adopted in industry for real-world RL deployments: examples include Google's use of RLlib for data center cooling optimization, autonomous vehicle companies using it for simulation-based policy training, and game studios employing it for NPC behavior and procedural content generation. Its broad algorithm coverage and production-grade reliability make it a standard choice when teams need RL infrastructure without committing to a single algorithm or domain.
+
+\textbf{Relevance to LLM and Speech RL.} From the perspective of LLM or speech RL, RLlib represents a baseline of capabilities that domain-specific frameworks must either replicate or build upon. RLlib provides strong primitives for distributed rollout, off-policy learning, and replay buffers, but it lacks abstractions for text tokenization, reward models, KL penalties toward reference policies, or verifiable rewards—all central to RLHF. Adapting RLlib to LLM alignment or speech tasks requires defining custom environments where observations are token sequences or audio features, actions are next-token predictions or acoustic model outputs, and rewards are computed from preference models or WER/CER metrics. While technically feasible, this places significant burden on users to implement domain-specific logic that RLHF frameworks provide out-of-the-box. Nonetheless, RLlib's maturity in handling long-horizon tasks, partial observability (via RNN policies), and multi-agent coordination offers architectural patterns that speech or multi-modal RL systems could adopt—for example, treating multi-speaker diarization as a multi-agent problem or using RLlib's offline RL utilities to train from logged speech correction data.
+
+
+\section{Comparative Analysis}
+\label{sec:comparison}
+
+Having surveyed ten RL and RLHF frameworks individually, we now synthesize their capabilities through systematic comparison across the six dimensions introduced in Section~\ref{sec:background}: system architecture, algorithmic coverage, parallelism and scale, data and reward plumbing, continual learning readiness, and modality focus. This comparative analysis reveals both convergent design patterns—such as the near-universal adoption of PPO as the baseline on-policy algorithm and the separation of rollout and training subsystems—and significant divergences reflecting different priorities. Full-stack systems prioritize integrated optimization and production robustness, asynchronous systems maximize throughput at the cost of algorithmic complexity, research libraries emphasize modularity and ease of experimentation, and general-purpose libraries provide domain-agnostic substrates requiring substantial customization for language or speech tasks. Understanding these trade-offs enables practitioners to select frameworks appropriate for their deployment scenarios and identifies gaps that domain-specific systems must address. We organize this analysis to highlight: first, a comprehensive feature matrix comparing all frameworks side-by-side; second, the landscape of RL algorithms and their implementations; third, common architectural patterns and their implications; fourth, scalability characteristics and performance benchmarks; and finally, ecosystem maturity and adoption considerations.
+
+\subsection{Framework Comparison Matrix}
+
+Table~\ref{tab:framework-comparison} presents a comprehensive comparison of all ten frameworks across the six key dimensions. This matrix provides a quick reference for practitioners evaluating frameworks and highlights systematic gaps relevant to our subsequent analysis of speech-to-text applications.
+
+\begin{table*}[t]
+\centering
+\caption{Comprehensive Comparison of RL and RLHF Frameworks}
+\label{tab:framework-comparison}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}lllllll@{}}
+\toprule
+\textbf{Framework} & \textbf{Architecture} & \textbf{Algorithms} & \textbf{Max Scale} & \textbf{Modality} & \textbf{Continual Learning} & \textbf{Production Ready} \\
+\midrule
+\textbf{verl} & Dataflow-based, & PPO, GRPO, RLVR, & 70B+, 3D & Text LLMs, & Replay (PF-PPO), & High \\
+ & decoupled & REINFORCE++, & parallelism, & multi-turn & experimental & (ByteDance) \\
+ & rollout/training & multi-turn agents & MoE support & agents & async modes & \\
+\midrule
+\textbf{OpenRLHF} & Ray orchestration, & PPO, REINFORCE++, & 70B+, ZeRO-3, & Text LLMs, & Generic replay, & High \\
+ & vLLM rollout + & GRPO, RLOO, DPO, & tensor/seq & single/multi- & no drift protocols & (production) \\
+ & DeepSpeed training & KTO, async variants & parallelism & turn agents & & \\
+\midrule
+\textbf{slime} & 3-module: training, & PPO, SFT, RLVR, & Tens to 100B+, & Text LLMs, & Data buffer, & Medium \\
+ & rollout, buffer; & custom rewards, & Megatron & agentic tasks & no explicit & (research/ \\
+ & SGLang + Megatron & agent workflows & parallelism & & continual learning & production) \\
+\midrule
+\textbf{Miles} & slime fork + & PPO variants, & 100B+ MoE, & Text LLMs, & Improved replay, & High \\
+ & train-infer & speculative decoding, & FSDP2, expert & VLMs & no drift protocols & (enterprise \\
+ & consistency & online draft training & parallelism & & & MoE focus) \\
+\midrule
+\textbf{DeepSpeed-Chat} & Hybrid Engine, & SFT, reward model, & 1.3B–175B+, & Text LLMs & EMA, mixture & High \\
+ & 3-stage InstructGPT & PPO + EMA + & ZeRO-3, & (ChatGPT-like & training, & (Microsoft) \\
+ & pipeline & mixture training & tensor parallel & conversational) & no continual focus & \\
+\midrule
+\textbf{AReaL} & Async decoupled & Staleness-aware & Up to 70B, & Text LLMs & Staleness control, & Medium \\
+ & rollout/training, & PPO, off-policy & distributed & (reasoning & async replay & (research \\
+ & staleness control & corrections & queues & tasks) & via staleness & demo) \\
+\midrule
+\textbf{TRL} & Trainer APIs, & PPO, DPO, SFT, & 1–13B, single- & Text LLMs & KL control, & Low-Medium \\
+ & HF Transformers & RLOO, value-head & node or small & & no explicit & (research/ \\
+ & integration & models & DDP & & continual learning & prototyping) \\
+\midrule
+\textbf{TRLX} & Distributed training & PPO, ILQL, & 7–70B+, model & Text LLMs & Offline RL (ILQL), & Medium \\
+ & stack: DDP, sharding, & LoRA-based RL, & sharding, tensor/ & & no explicit & (open-source \\
+ & tensor/pipeline & offline RL & pipeline parallel & & continual learning & community) \\
+\midrule
+\textbf{RL4LMs} & Modular task/reward & PPO, A2C, TRPO, & 1–3B, single- & Text LLMs & Adaptive KL, & Low \\
+ & abstractions, Gym & NLPO, adaptive & node multi-GPU, & (diverse NLP & no explicit & (research \\
+ & environments & KL control & data parallel & tasks) & continual learning & benchmarking) \\
+\midrule
+\textbf{RLlib} & Ray-based & PPO, DQN, SAC, & Domain-dependent, & Domain- & Replay buffers, & High \\
+ & distributed execution, & A3C, IMPALA, & multi-node & agnostic & offline RL, & (production \\
+ & generic RL substrate & multi-agent, offline & scalable via Ray & (control, games, & generic (no LLM & across many \\
+ & & RL, model-based & & robotics, etc.) & or STT specifics) & domains) \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Several patterns emerge from this matrix. First, all LLM-focused frameworks converge on PPO as a core algorithm, with variations in implementation details (clipping, KL penalties, advantage estimation). Second, scale separates research libraries (TRL, RL4LMs: 1–13B) from production systems (verl, OpenRLHF, Miles, DeepSpeed-Chat: 70B–175B+), with TRLX occupying a middle ground (7–70B). Third, none of the frameworks provide first-class continual learning abstractions beyond generic replay buffers or KL regularization; drift protocols, backward-transfer metrics, and speech-specific sequential adaptation strategies are absent. Fourth, modality focus is exclusively text-based for LLM frameworks and domain-agnostic for RLlib, with no native support for audio, streaming constraints, or speech-specific metrics like WER/CER in any surveyed system. Finally, production readiness correlates strongly with origin: frameworks from large organizations (ByteDance's verl, Microsoft's DeepSpeed-Chat) or those designed for enterprise use (Miles) exhibit greater robustness, documentation, and operational tooling compared to community-driven research libraries.
+
+\subsection{Algorithmic Landscape}
+
+The algorithmic coverage across frameworks reveals both convergence on established methods and exploration of novel variants optimized for LLM-specific challenges. Figure~\ref{fig:algorithm-landscape} visualizes the distribution of algorithm support across frameworks; here we provide detailed analysis of the key algorithmic families and their trade-offs.
+
+\textbf{On-Policy Algorithms.} Proximal Policy Optimization (PPO) is implemented by nine of ten frameworks (all except RLlib's exclusive use is broader), confirming its status as the default RLHF algorithm. PPO's popularity stems from its balance between sample efficiency, stability, and ease of implementation: the clipped surrogate objective prevents excessively large policy updates, while KL penalties toward reference policies maintain linguistic quality and prevent reward hacking~\cite{ppo-paper, instructgpt-paper}. Implementations vary significantly: OpenRLHF and verl include sophisticated refinements such as distributed advantage normalization, adaptive KL scheduling, and entropy bonuses; DeepSpeed-Chat adds EMA (exponential moving average) policies for more stable reference probabilities; and RL4LMs introduces NLPO (Natural Language Policy Optimization) with natural gradients for improved stability on discrete action spaces.
+
+Beyond vanilla PPO, several frameworks implement recent variants designed to improve sample efficiency or reduce variance. GRPO (Group Relative Policy Optimization), supported by verl and OpenRLHF, computes advantages relative to groups of trajectories rather than a learned value function, reducing the need for accurate critic training. RLOO (REINFORCE Leave-One-Out), available in TRL and OpenRLHF, uses leave-one-out baselines to reduce variance without requiring separate value networks. REINFORCE++ and its variants, implemented in verl and OpenRLHF, incorporate reward normalization and advantage clipping strategies that improve training stability.
+
+\textbf{Offline Alignment Methods.} Direct Preference Optimization (DPO) and related offline methods—KTO (Kahneman-Tversky Optimization), rejection sampling, and conditional SFT—are gaining traction as alternatives to online RLHF. Supported by TRL, TRLX, OpenRLHF, and DeepSpeed-Chat, these methods optimize policies directly on preference datasets without requiring online rollouts or explicit reward models~\cite{dpo-paper}. DPO reparameterizes the RLHF objective to eliminate the reward model, using a contrastive loss that increases the likelihood of preferred responses while decreasing dispreferred ones, controlled by a temperature parameter $\beta$. The primary advantage is computational efficiency: training completes in one stage rather than three (SFT, reward model, PPO), with typical speedups of 2–5× over full RLHF pipelines. However, DPO is limited to offline preference data and cannot easily incorporate verifiable rewards, making it less suitable for domains like code generation or mathematical reasoning where online execution feedback is valuable.
+
+ILQL (Implicit Language Q-Learning), implemented uniquely by TRLX, represents another offline approach using Q-learning rather than policy optimization. ILQL learns Q-values from logged trajectories and extracts policies by selecting high-Q actions, offering different stability characteristics than DPO and enabling more straightforward incorporation of value-based RL techniques like replay buffers and target networks~\cite{ilql-paper}.
+
+\textbf{Verifiable Rewards (RLVR).} verl and slime distinguish between RLHF (learned reward models from preferences) and RLVR (verifiable reward functions such as unit test pass rates, symbolic math checkers, or compiler outputs). RLVR is particularly effective for domains with objective correctness criteria, eliminating the need for expensive human annotation and providing dense, reliable feedback. verl's extensive support for RLVR—including multi-turn agents that interact with code execution environments, search APIs, and tool calls—positions it as the leading framework for reasoning-intensive tasks where rewards are cheaply computable from environment interactions rather than learned from preferences.
+
+\textbf{Asynchronous and Off-Policy Methods.} AReaL's staleness-aware PPO and verl's experimental async modes represent attempts to maximize throughput by decoupling rollout and training, accepting slightly stale trajectories in exchange for continuous GPU utilization. These methods adjust importance sampling weights and clipping thresholds based on trajectory age, maintaining convergence despite using outdated policies for data collection. While effective for compute-bound scenarios, asynchronous methods introduce implementation complexity and hyperparameter sensitivity that limit their adoption outside specialized high-throughput settings.
+
+\textbf{Multi-Agent and General RL.} RLlib's broad algorithm coverage—spanning DQN, SAC, TD3, IMPALA, multi-agent methods, and model-based RL—reflects its domain-agnostic positioning. However, none of these algorithms are directly applicable to LLM alignment without significant adaptation: DQN and SAC are designed for low-dimensional continuous control, while multi-agent methods assume independent policies with local observations. The gap between RLlib's algorithm suite and RLHF-specific methods illustrates the specialization required for language model post-training.
+
+\subsection{System Architecture Patterns}
+
+Beneath algorithmic differences, frameworks exhibit recurring architectural patterns that reflect fundamental trade-offs in RLHF system design. We identify four primary patterns and analyze their implications for scalability, flexibility, and operational complexity.
+
+\textbf{Coupled vs. Decoupled Rollout-Training.} The most fundamental architectural choice is whether rollout (experience generation) and training (policy optimization) execute in the same process or separate services. \textit{Coupled architectures}—exemplified by DeepSpeed-Chat's Hybrid Engine—run rollout and training within a single unified process that switches between inference mode (using optimized kernels, tensor parallelism) and training mode (using ZeRO sharding, gradient accumulation). This design minimizes memory movement, simplifies deployment, and enables aggressive memory optimizations by sharing allocations across phases. However, it tightly couples inference and training resource requirements: users cannot independently scale rollout parallelism (limited by inference latency) and training batch sizes (limited by gradient accumulation needs).
+
+\textit{Decoupled architectures}—adopted by verl, OpenRLHF, slime, Miles, and AReaL—separate rollout and training into independent services communicating via shared memory, distributed object stores (Ray's plasma), or network protocols. Rollout services run inference-optimized engines (vLLM, SGLang) with high throughput and low latency, while training services run optimizer-focused backends (DeepSpeed, FSDP, Megatron) with aggressive memory saving. Decoupling enables independent scaling: for example, deploying many rollout workers to handle long-context generation while using fewer but larger training nodes for gradient computation. The cost is increased system complexity: orchestration logic must manage data flow, handle failures in either subsystem independently, and carefully tune queue sizes to prevent memory exhaustion or starvation.
+
+AReaL represents an extreme form of decoupling through asynchrony, where rollout and training proceed completely independently with no synchronization barriers, maximizing throughput at the cost of staleness and algorithmic complexity.
+
+\textbf{Dataflow Abstractions.} verl's hybrid-controller dataflow engine introduces a higher-level abstraction: workflows are defined as directed acyclic graphs (DAGs) where nodes are model services (actor, critic, reward, reference, environment) and edges represent data dependencies. This enables composition of complex pipelines—for example, multi-reward RLHF where multiple reward models evaluate each trajectory, or multi-turn agents where environment interactions are interleaved with policy rollouts. The dataflow paradigm clarifies dependencies, enables automatic parallelization, and simplifies reasoning about correctness. However, it requires users to think in terms of graph construction rather than sequential imperative code, increasing the learning curve.
+
+Other frameworks (OpenRLHF, slime, Miles) use more imperative orchestration: training loops explicitly call rollout functions, collect results, and invoke training steps. This is conceptually simpler but less flexible for complex multi-model scenarios.
+
+\textbf{Inference Engine Integration.} The choice of inference backend significantly impacts throughput and memory efficiency. vLLM, integrated by verl and OpenRLHF, provides state-of-the-art throughput through PagedAttention (eliminates memory fragmentation in KV caches), continuous batching (dynamically adds/removes requests mid-batch), and tensor parallelism. SGLang, used by slime and Miles, optimizes for complex prompting patterns, structured generation, and tool-use scenarios common in agentic RLHF. Hugging Face Transformers, the default for TRL and RL4LMs, offers maximum compatibility and simplicity but significantly lower throughput than specialized engines. The gap can be 3–10× in tokens-per-second for large models, directly translating to equivalent differences in RLHF training speed since rollout dominates wall-clock time.
+
+\textbf{Modularity and Extensibility.} Research libraries prioritize modularity: RL4LMs cleanly separates tasks, rewards, environments, algorithms, and policies, enabling users to swap components via configuration files. TRL and TRLX expose simple trainer APIs that hide complexity but offer escape hatches for customization. In contrast, production systems optimize for integration: Miles' train-inference consistency requires tight coupling between SGLang and FSDP implementations, and DeepSpeed-Chat's Hybrid Engine relies on co-designed inference and training modes. This trade-off between modularity (easier experimentation, lower performance) and integration (higher performance, harder modification) recurs across the ecosystem.
+
+\subsection{Scalability and Performance}
+
+Scalability characteristics determine the maximum model sizes, dataset scales, and cluster configurations that frameworks support, directly impacting their applicability to frontier model training versus research-scale experiments.
+
+\textbf{Model Scale Support.} Production systems support models up to 175B parameters (DeepSpeed-Chat with OPT-175B) and beyond, with Miles specifically optimized for MoE architectures exceeding 100B activated parameters (e.g., DeepSeek-V3-style models). These frameworks leverage 3D parallelism: tensor parallelism splits individual layers across GPUs, pipeline parallelism divides models into stages with microbatching, and data parallelism replicates models for gradient averaging. Expert parallelism, used by Miles for MoE training, distributes expert layers across devices while keeping shared layers replicated or tensor-parallel.
+
+In contrast, research libraries target 1–13B models (TRL, RL4LMs) or up to 70B with careful resource management (TRLX), using simpler parallelism strategies (DDP, basic model sharding) that do not require extensive distributed systems expertise. This 10× to 100× scale gap reflects the intended user base: researchers iterating on algorithms versus ML engineers deploying production services.
+
+\textbf{Throughput Benchmarks.} Reported performance varies by workload, but several representative comparisons exist. OpenRLHF demonstrates 1.8–2.5× speedups over DeepSpeed-Chat baselines at 7–70B scales, attributable to vLLM integration and better scheduling. AReaL achieves 2.7× faster time-to-target-accuracy than synchronous PPO through asynchronous execution. DeepSpeed-Chat reports 6–19× improvements over PyTorch/Colossal-AI reference implementations, primarily from the Hybrid Engine's memory optimizations. Miles' speculative decoding with online draft training provides 25%+ latency reductions during rollout compared to frozen draft models. These improvements compound: switching from a naive PyTorch implementation to a production stack like OpenRLHF or Miles can yield 5–20× overall speedups through the combination of better inference engines, training optimizations, and orchestration.
+
+\textbf{Memory Optimization Techniques.} Memory efficiency determines whether large models fit on available hardware. Key techniques include: ZeRO-3 optimizer state sharding (DeepSpeed-Chat, OpenRLHF) reduces per-GPU memory by partitioning optimizer states, gradients, and parameters across devices; FSDP (verl, Miles) provides similar sharding with better PyTorch integration; gradient checkpointing trades memory for computation by recomputing activations during backward passes; FlashAttention-2 (all recent frameworks) reduces attention memory from $O(n^2)$ to $O(n)$ for sequence length $n$; mixed-precision training (FP16/BF16) halves memory with minimal accuracy impact; and quantization (INT8/INT4/FP8 in Miles) further reduces memory at the cost of careful numerical tuning.
+
+These optimizations enable, for example, training 70B models on 8× A100-80GB GPUs (total 640GB) when naive implementations would require 2TB+. The engineering investment in memory optimization distinguishes production systems from research libraries.
+
+\textbf{Scaling Limitations.} Despite optimizations, fundamental bottlenecks remain. Rollout throughput saturates when inference latency exceeds training time, making asynchronous architectures beneficial. Communication bandwidth limits scaling efficiency beyond 100–200 GPUs for models under 70B parameters, as gradient synchronization and parameter broadcasts dominate computation. Multi-node RLHF suffers from higher variance than supervised training because on-policy data collection is inherently sequential (cannot trivially parallelize across nodes without sacrificing sample efficiency). These limitations explain why most reported RLHF experiments use 8–64 GPUs even when larger clusters are available.
+
+\subsection{Ecosystem and Adoption}
+
+Ecosystem maturity—encompassing documentation quality, community support, integration with popular tools, and demonstrated production deployments—critically impacts framework selection for practitioners.
+
+\textbf{Documentation and Learning Resources.} TRL benefits from Hugging Face's extensive documentation ecosystem, including tutorials, blog posts, and integration examples with thousands of models on the Hub. DeepSpeed-Chat provides Microsoft-quality documentation with one-click scripts and Azure deployment guides. verl and OpenRLHF include comprehensive READMEs, API references, and example recipes for standard benchmarks. In contrast, slime and Miles have sparser documentation, reflecting their origins as research artifacts, though community blogs and external tutorials fill some gaps. RL4LMs is well-documented for academic use, with detailed explanations of task configurations and GRUE benchmark protocols. RLlib's documentation is extensive but generic, requiring significant user effort to adapt to LLM-specific scenarios.
+
+\textbf{Community Activity and Support.} GitHub metrics provide rough proxies for adoption: as of early 2026, TRL has accumulated over 9,000 stars, OpenRLHF over 6,000, verl over 4,000, and DeepSpeed-Chat (as part of DeepSpeed) over 34,000. Community activity—measured by issue response times, pull request velocity, and third-party contributions—is highest for TRL, OpenRLHF, and RLlib, all of which have active maintainer teams and regular releases. slime and Miles have smaller but engaged communities, with frequent updates tied to research milestones. TRLX and RL4LMs see less frequent updates but maintain stable codebases.
+
+\textbf{Integration with ML Ecosystems.} Tight integration with existing tools reduces friction for adoption. TRL, TRLX, and RL4LMs integrate seamlessly with Hugging Face Transformers, Datasets, and the Hub, enabling users to load pretrained models, push checkpoints, and share training runs with minimal code. verl, OpenRLHF, slime, and Miles integrate with multiple backends (Megatron, DeepSpeed, FSDP), providing flexibility but requiring users to understand trade-offs. RLlib's Ray ecosystem integration enables end-to-end ML workflows combining training (RLlib), hyperparameter tuning (Ray Tune), and serving (Ray Serve), valuable for organizations already using Ray.
+
+\textbf{Production Deployments.} Demonstrated production use signals maturity and robustness. verl powers ByteDance's LLM training, OpenRLHF is used by multiple AI labs and startups for alignment research, DeepSpeed-Chat underpins Microsoft's internal RLHF pipelines, Miles serves enterprise MoE training at RadixArk and affiliated organizations, and RLlib runs in production at Google (data center control), autonomous vehicle companies, and game studios. TRL, TRLX, RL4LMs, slime, and AReaL are primarily research tools without large-scale public production deployments, though their techniques influence production systems. This distinction between research-validated and production-validated frameworks guides risk-averse practitioners toward the latter for critical workloads.
+
+
+
+\section{Experimental Evaluation on Speech-to-Text}
+
+\subsection{Experimental Design}
+
+\subsubsection{Research Questions}
+% RQ1: Adaptability - ease of adapting text frameworks to STT
+% RQ2: Performance - RL improvements over SFT baselines
+% RQ3: Efficiency - computational costs
+% RQ4: Stability - hyperparameter sensitivity
+% RQ5: Domain robustness - handling distribution shift
+% RQ6: Continual learning - sequential adaptation without forgetting
+
+\subsubsection{Datasets}
+% Common Voice 17.0 (multi-accent)
+% LibriSpeech (clean + challenging)
+% Speech Commands (keyword spotting)
+% VoxPopuli (parliamentary speeches)
+% TED-LIUM Release 3 (conversational)
+% ST-AEDS (spontaneous speech)
+% Edinburgh DataShare Noisy Speech Database
+
+\subsubsection{Drift Protocol Scenarios}
+% Scenario 1: Clean → Noisy
+% Scenario 2: Single accent → Multi-accent
+% Scenario 3: Read speech → Spontaneous
+
+\subsubsection{Baseline Models}
+% Wav2Vec2-base (94.4M params)
+% Whisper-small (244M params)
+
+\subsubsection{Framework Selection for Experiments}
+% verl or OpenRLHF (full-stack)
+% TRL (lightweight)
+% RL4LMs (research-oriented)
+% Selection rationale
+
+\subsubsection{Adaptation Protocol}
+% Minimal STT environment adapter implementation
+% Reward function design: -WER, -CER
+% PPO training with fixed compute budget
+% Fixed budget: 20 GPU-hours per framework
+
+\subsubsection{Evaluation Metrics}
+% Accuracy: WER, CER (overall and per-domain)
+% Efficiency: GPU-hours per WER point, memory, throughput
+% Stability: mean ± std across seeds
+% Robustness: WER on OOD test sets
+% Forgetting: backward transfer (BWT)
+% Implementation effort: LOC, engineering time
+
+\subsection{Implementation and Adaptation Challenges}
+% For each framework tested:
+% - Effort to create STT environment
+% - Compatibility with audio models
+% - Reward function flexibility
+% - Variable-length sequence handling
+% - Streaming/online inference support
+% - Issues and workarounds
+
+\subsection{Results and Analysis}
+
+\subsubsection{Baseline Performance}
+% Table III: Supervised fine-tuning only
+% Model | Dataset | WER | CER | GPU-hours
+
+\subsubsection{RL Fine-Tuning Results}
+% Table IV: RL results across frameworks
+% Framework | Model | Dataset | WER (baseline→RL) | CER | GPU-hours | Memory
+% Figure 3: Learning curves (WER vs training steps)
+
+\subsubsection{Domain Transfer and Continual Learning}
+% Table V: Sequential domain adaptation
+% Framework | Scenario | Domain 1 WER | Domain 2 WER | BWT | GPU-hours
+% Figure 4: Efficiency frontier (WER improvement vs GPU-hours)
+
+\subsubsection{Robustness Analysis}
+% Figure 5: WER across clean/noisy/accented test sets
+% Cross-domain generalization results
+
+\subsubsection{Analysis and Insights}
+% Which frameworks achieved best improvements?
+% Most compute-efficient?
+% Best domain robustness?
+% Least catastrophic forgetting?
+% Implementation complexity vs performance trade-offs
+% Where frameworks struggled or failed
+
+\subsection{Key Findings from Experiments}
+% Synthesis of empirical results
+% Framework X/Y adapted successfully; Z required workarounds
+% RL provided X-Y% WER improvements
+% Compute costs: X to Y GPU-hours
+% Domain robustness: replay frameworks showed Z% less forgetting
+% Reward design: direct WER rewards vs learned models
+% Observed limitations
+
+\section{Gap Analysis for Production STT Self-Learning}
+
+\subsection{Modality and Environment Gaps}
+% Observed: X-Y LOC adapter code required
+% Finding: No native audio/streaming support
+% Need: Speech-native environment abstractions
+
+\subsection{Reward Design for Speech}
+% Observed: Scalar trajectory rewards assumed
+% Finding: Direct WER/CER requires custom implementation
+% Need: Built-in fine-grained speech metrics
+
+\subsection{Closed-Loop Self-Learning Capabilities}
+% Observed: Manual dataset curation required
+% Finding: No inference-time error detection integration
+% Gap: Missing inference-production-retraining connection
+% Need: Integrated error detection → correction → retraining
+
+\subsection{Adaptive Scheduling and Cost Optimization}
+% Observed: Fixed training schedules in experiments
+% Finding: No cost-efficiency monitoring or dynamic adjustment
+% Need: Schedulers with cost-benefit analysis
+
+\subsection{Continual Learning and Forgetting}
+% Observed: Framework X showed Y% BWT degradation
+% Finding: Generic replay lacks speech drift protocols
+% Need: Domain-aware replay, BWT monitoring
+
+\subsection{Safety and Poisoning Defenses}
+% Observed: No confidence filtering or poison detection
+% Finding: Self-generated data risks unaddressed
+% Need: Confidence thresholds, AB testing, rollback
+
+\subsection{Production Deployment Readiness}
+% Observed: Research-optimized, not service-oriented
+% Finding: Missing operational concerns
+% Need: Production orchestration, observability, guardrails
+
+\section{Discussion}
+
+\subsection{Broader Implications}
+% Lessons applicable to other modalities
+% Trade-offs: lightweight vs full-stack frameworks
+% When to use which system
+
+\subsection{Limitations of Current Study}
+% Compute budget constraints
+% English-only datasets
+% Single-node experiments
+% Subset of frameworks evaluated empirically
+
+\subsection{Open Challenges}
+% Theoretical convergence under self-generated data
+% Standardization of speech RL benchmarks
+% Human-in-the-loop vs autonomous trade-offs
+% Multi-modal self-learning
+
+\section{Future Directions and Design Recommendations}
+
+\subsection{Towards Speech-Native RL Frameworks}
+% Need for standard audio environment interfaces
+% Multi-metric reward systems for WER/CER/domain errors
+% Challenge: balancing generality with speech optimizations
+% Open question: optimal environment abstractions
+
+\subsection{Enabling Closed-Loop Self-Learning}
+% Integration of inference-time error detection with training
+% Adaptive scheduling based on cost and performance
+% Open question: optimal trigger policies for retraining
+% Challenge: maintaining system stability under self-generated data
+
+\subsection{Addressing Continual Learning in Speech}
+% Speech-specific replay and drift protocols
+% Backward-transfer metrics and forgetting prevention
+% Challenge: sequential domain adaptation without human curation
+% Open question: optimal replay strategies for speech
+
+\subsection{Safety and Production Readiness}
+% Confidence-based filtering and poison detection
+% AB testing and rollback for speech metrics
+% Open question: balancing autonomy with safety guarantees
+% Challenge: production-grade orchestration at scale
+
+\subsection{Interoperability and Standardization}
+% Adapters to existing RL engines
+% Community benchmarks for speech RL
+% Towards modular, composable architectures
+% Open question: standard interfaces for speech RL
+
+\subsection{Extensions Beyond Speech-to-Text}
+% Multilingual STT systems
+% Multi-modal self-learning (audio-visual)
+% Other sequence-to-sequence tasks (MT, OCR, video captioning)
+% Open question: unified framework for continual generative AI
+
+\section{Conclusion}
+% Comprehensive survey of 10 RL/RLHF frameworks
+% Empirical evaluation reveals adaptation challenges and performance characteristics
+% Seven critical capabilities identified for production STT self-learning
+% Design recommendations provide roadmap for future research
+% Future work will explore systems addressing these challenges
+
+% Acknowledgments
+\section*{Acknowledgments}
+% Funding, compute resources, collaborators
+
+% References
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

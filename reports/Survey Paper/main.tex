@@ -1,0 +1,227 @@
+\documentclass[conference]{IEEEtran}
+
+% *** PACKAGES ***
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{cite}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{xcolor}
+
+\begin{document}
+
+% *** TITLE & AUTHORS ***
+\title{A Survey of Fine-Tuning Frameworks and Reinforcement Learning Tooling for Speech-to-Text}
+
+\author{
+    \IEEEauthorblockN{
+    Gautam Agarwal\IEEEauthorrefmark{1},
+    Shivangi Kumar\IEEEauthorrefmark{1},
+    Chen Wang\IEEEauthorrefmark{2}}
+    \IEEEauthorblockA{\IEEEauthorrefmark{1}Department of Computer Science, Columbia University, New York, USA\\
+    Email: \{first.last\}@example.edu}
+    \IEEEauthorblockA{\IEEEauthorrefmark{2}IBM Research Center, New York, USA\\
+    Email: second@example.com}
+}
+
+\maketitle
+
+% *** ABSTRACT & INDEX TERMS ***
+\begin{abstract}
+% TODO: 150--250 word summary of:
+% - Motivation: domain shift, static STT deployments, lack of self-adaptation
+% - Scope: survey of STT fine-tuning toolkits (NeMo, ESPNet, Align-SLM / SpeechLM)
+%          and RL/RLHF frameworks used for model alignment
+% - Contributions: taxonomy, framework analyses, experiments, and gap analysis
+% - Outcome: design requirements for self-adaptive STT, to be addressed in follow-up work
+\end{abstract}
+
+\begin{IEEEkeywords}
+Speech-to-Text, Reinforcement Learning, RLHF, Continuous Learning, Fine-Tuning, NeMo, ESPNet, Align-SLM
+\end{IEEEkeywords}
+
+% *** MAIN BODY ***
+
+\section{Introduction}
+% A. Motivation and Problem Context
+% - Degradation of STT under domain shift, noise, accents
+% - Limitations of static training + periodic manual retraining
+% - Lack of closed-loop, self-improving STT systems
+
+% B. Scope and Survey Objectives
+% - Survey STT fine-tuning frameworks: NeMo, ESPNet, Align-SLM / SpeechLM toolkits
+% - High-level scan of RL/RLHF frameworks relevant to STT (VERL, TRL, DeepSpeed-Chat, etc.)
+% - Focus on identifying design gaps rather than proposing a full solution
+
+% C. Contributions and Paper Organization
+% - Taxonomy of STT fine-tuning frameworks
+% - Mapping between STT toolchains and RL/RLHF components
+% - Experimental comparison on shared datasets and metrics
+% - Gap analysis and research opportunities, motivating follow-up work
+
+\section{Background and Problem Setting}
+% A. Modern STT Architectures and Supervised Fine-Tuning
+% - Brief overview of encoder--decoder, CTC, RNN-T, Conformer-based models
+% - Standard supervised fine-tuning loop and metrics (WER, CER, etc.)
+
+% B. Reinforcement Learning and RLHF for Sequence Models
+% - RL basics for sequence modeling (policies, rewards, trajectories)
+% - RLHF pipeline: SFT, reward modeling, PPO/GRPO/DPO, RLAIF
+
+% C. Continuous and Lifelong Learning in STT
+% - Catastrophic forgetting, backward transfer, replay buffers
+% - Scheduling problem: when to fine-tune under cost constraints
+
+\section{Survey Methodology and Evaluation Protocol}
+% A. Framework Selection Criteria
+% - Inclusion criteria for STT toolkits and RL/RLHF frameworks
+% - Versioning and documentation sources
+
+% B. Experimental Protocol for STT Frameworks
+% - Datasets: list and characteristics (clean, noisy, domain-specific)
+% - Metrics: WER, CER, DER, Verb Error Rate, Domain Error Rate, latency, cost
+
+% C. Reproducibility Setup
+% - Docker images, GCP or cluster configuration (high level)
+% - Random seeds, hyperparameter ranges
+
+\section{Taxonomy of STT Fine-Tuning Frameworks}
+% A. Taxonomy Dimensions
+% - Model support (CTC, RNN-T, encoder--decoder, streaming/offline)
+% - Adaptation strategies (full FT, PEFT, multi-stage training)
+% - Data/recipe ecosystems and configuration styles
+
+% B. RL Alignment and Control Hooks as a Taxonomy Dimension
+% - Where reward signals can be injected (loss abstraction, scorers)
+% - Modularity of training loops; logging, replay, online/incremental support
+
+% (Optional) C. Summary Table
+% - Table: frameworks vs. taxonomy dimensions
+% \begin{table}[t]
+% \centering
+% \caption{Taxonomy of STT Fine-Tuning Frameworks}
+% \begin{tabular}{lccc}
+% \toprule
+% Framework & Model Types & PEFT & RL Hooks \\
+% \midrule
+% NeMo     & ... & ... & ... \\
+% ESPNet   & ... & ... & ... \\
+% Align-SLM / SpeechLM & ... & ... & ... \\
+% \bottomrule
+% \end{tabular}
+% \label{tab:taxonomy}
+% \end{table}
+
+\section{NVIDIA NeMo for STT Fine-Tuning}
+% A. Framework Overview
+% - ASR pipeline: data loaders, models, loss functions, config-driven training
+
+% B. Fine-Tuning Strategies
+% - Full fine-tuning vs LoRA/adapters/BitFit and their parameter efficiency
+% - Domain/speaker adaptation examples
+
+% C. RL/RLHF Compatibility Analysis
+% - Existing RLHF support (NeMo-Aligner for LLMs)
+% - Feasibility of integrating reward-based objectives for STT
+% - Limitations for online and streaming RL
+
+\section{ESPNet and ESPnet-SpeechLM}
+% A. ESPNet Overview
+% - ASR and broader speech toolkit; recipe structure, hybrid CTC/attention models
+
+% B. Fine-Tuning and Adaptation Mechanisms
+% - Domain/speaker adaptation recipes; configuration hooks
+
+% C. RLHF and Preference-Based Learning
+% - ESPnet-SpeechLM and RLHF capabilities
+% - Applicability to STT and gaps (WER, streaming, deployment constraints)
+
+\section{Align-SLM as a Speech RL Alignment Case Study}
+% A. Align-SLM Overview
+% - Textless spoken language modeling
+% - RLAIF / DPO training with AI-generated preferences
+
+% B. Lessons for STT
+% - What transfers: preference-based alignment, semantic metrics, AI feedback
+% - What does not: generative continuation vs. transcription, CTC alignment
+
+\section{Survey of RL/RLHF Frameworks Relevant to STT}
+% A. Taxonomy of RL/RLHF Frameworks
+% - Groups: LM-focused RLHF toolkits vs general RL libraries
+
+% B. High-Level Summaries
+% - VERL, AREAL, MILES, SMILE
+% - OpenRLHF, TRL, DeepSpeed-Chat, TRLX, RL4LMs
+% - Ray RLlib and related generic RL libraries
+
+% C. STT Integration Gap (Teaser)
+% - Lack of native audio/CTC environments, replay tailored to STT,
+%   and tight coupling to NeMo/ESPNet
+
+\section{Cross-Framework Mapping: STT vs. RL/RLHF Components}
+% A. Conceptual Mapping
+% - STT components: data loaders, decoders, trainers, metrics
+% - RL/RLHF components: environment, policy, reward, replay buffer, optimizer
+
+% B. Integration Pain Points
+% - Training loop ownership, observation/action mismatch
+% - Performance and deployment constraints for STT vs text LMs
+
+% (Optional) C. Mapping Table
+% - Framework-by-framework mapping of available/missing pieces
+
+\section{Experimental Comparison of STT Fine-Tuning Frameworks}
+% A. Experimental Design
+% - Baseline fine-tuning for NeMo, ESPNet (and others if applicable)
+% - PEFT variants, multi-domain and drift scenarios
+
+% B. Metrics and Evaluation
+% - Accuracy, robustness under domain shift, continual-learning metrics
+% - Efficiency: latency, GPU-hours, cost per 1\% WER improvement
+
+% C. Results and Discussion
+% - Summary of key trends; framework strengths/weaknesses from experiments
+% - Observations that feed directly into the gap analysis
+
+\section{Gap Analysis and Research Opportunities}
+% A. Gaps in STT Fine-Tuning Frameworks
+% - Missing online/on-policy adaptation interfaces
+% - Limited continual-learning and replay-buffer support
+% - Lack of standardized reward interfaces over STT metrics
+
+% B. Gaps in RL/RLHF Frameworks for STT
+% - Text-only assumptions, no CTC/ASR awareness
+% - No turnkey integration with NeMo/ESPNet
+
+% C. Design Requirements for Self-Adaptive STT
+% - Desired properties of a unified, self-learning STT framework
+% - Keep description abstract to avoid overlapping with the follow-up paper
+
+\section{Open Challenges and Future Directions}
+% A. Technical Challenges
+% - Sample efficiency and stability of RL/RLHF for STT
+% - Robustness to noisy or adversarial feedback
+% - Multi-objective optimization (accuracy, latency, cost, safety)
+
+% B. Future Research Directions
+% - Preference-based alignment for STT
+% - Agentic STT systems with autonomous data curation and scheduling
+% - Integration into production MLOps and monitoring pipelines
+
+\section{Conclusion}
+% - Concise recap of survey findings
+% - Reiterate that existing tools fall short for full self-adaptive STT
+% - Explicitly state that this motivates dedicated frameworks,
+%   to be addressed in subsequent work
+
+% *** ACKNOWLEDGMENT (OPTIONAL) ***
+\section*{Acknowledgment}
+% TODO: Acknowledge funding, collaborators, data providers, etc.
+
+% *** REFERENCES ***
+\bibliographystyle{IEEEtran}
+\bibliography{references} % Create references.bib and manage with BibTeX
+
+\end{document}
