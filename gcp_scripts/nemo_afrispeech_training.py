@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import soundfile as sf
 import torch
+import datasets as _datasets_lib
 from datasets import Audio, Dataset, DatasetDict, load_dataset
 from jiwer import cer as compute_cer_jiwer
 from jiwer import wer as compute_wer_jiwer
@@ -46,6 +47,18 @@ from lightning.pytorch.callbacks import Callback
 
 from lightning.pytorch import LightningModule
 from nemo.collections.asr.models import EncDecCTCModelBPE
+
+
+def _require_datasets_script_support() -> None:
+    """HuggingFace `datasets` 3+ no longer runs hub dataset .py scripts (e.g. AfriSpeech)."""
+    parts = _datasets_lib.__version__.split(".")
+    major = int(parts[0]) if parts[0].isdigit() else 0
+    if major >= 3:
+        raise RuntimeError(
+            f"AfriSpeech-200 needs `datasets` < 3 (dataset scripts). You have {_datasets_lib.__version__}. "
+            'Run: python -m pip install "datasets>=2.14.0,<3.0.0"'
+        )
+
 
 # ---------------------------------------------------------------------------
 # Optional Gemini (LLM reward)
@@ -244,6 +257,7 @@ def _collect_clinical_from_stream(stream, max_n: Optional[int]) -> List[dict]:
 
 def load_afrispeech_clinical() -> Tuple[DatasetDict, str]:
     """Official train / validation / test with clinical filter."""
+    _require_datasets_script_support()
     name = _resolve_afrispeech_name()
     logger.info("Loading AfriSpeech-200 clinical (train/validation/test) from %s", name)
 
@@ -264,11 +278,15 @@ def load_afrispeech_clinical() -> Tuple[DatasetDict, str]:
         test_samples = _collect_clinical_from_stream(test_stream, CFG.TEST_SAMPLES)
         logger.info("  Test clinical clips: %d (cap=%s)", len(test_samples), CFG.TEST_SAMPLES)
 
+    logger.info("  Decoding train audio (resample 16 kHz) — can take several minutes …")
     train_ds = Dataset.from_list(train_samples).cast_column("audio", Audio(sampling_rate=16_000))
+    logger.info("  Decoding validation audio …")
     val_ds = Dataset.from_list(val_samples).cast_column("audio", Audio(sampling_rate=16_000))
     splits: Dict[str, Any] = {"train": train_ds, "validation": val_ds}
     if test_samples:
+        logger.info("  Decoding test audio …")
         splits["test"] = Dataset.from_list(test_samples).cast_column("audio", Audio(sampling_rate=16_000))
+    logger.info("  AfriSpeech clinical tensors ready (train=%d val=%d test=%d)", len(train_ds), len(val_ds), len(test_samples))
     return DatasetDict(splits), "transcript"
 
 
@@ -331,8 +349,12 @@ def build_nemo_manifest(dataset, split_name: str, audio_dir: str, text_field: st
     manifest_path = os.path.join(CFG.MANIFEST_DIR, f"{split_name}_manifest.json")
     written = 0
     skipped = 0
+    n_total = len(dataset) if hasattr(dataset, "__len__") else None
+    logger.info("  Writing manifest + WAVs for split=%s (%s rows) …", split_name, n_total if n_total is not None else "?")
     with open(manifest_path, "w", encoding="utf-8") as f:
         for i, sample in enumerate(dataset):
+            if i > 0 and i % 500 == 0:
+                logger.info("    %s manifest progress: %d rows scanned, %d written …", split_name, i, written)
             try:
                 audio_array = sample["audio"]["array"]
                 sr = int(sample["audio"]["sampling_rate"])
@@ -1163,6 +1185,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip_zero_shot", action="store_true")
     p.add_argument("--skip_librispeech_forgetting", action="store_true")
     p.add_argument("--skip_test_eval", action="store_true")
+    p.add_argument(
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Train/eval batch size (use 8 on V100 16GB for stt_en_conformer_ctc_medium if OOM)",
+    )
     return p.parse_args()
 
 
@@ -1197,6 +1225,8 @@ def main() -> None:
         CFG.RUN_LIBRISPEECH_FORGETTING = False
     if args.skip_test_eval:
         CFG.RUN_FINAL_TEST_EVAL = False
+    if args.batch_size is not None and not args.smoke_test:
+        CFG.BATCH_SIZE = args.batch_size
 
     set_seed(CFG.SEED)
 

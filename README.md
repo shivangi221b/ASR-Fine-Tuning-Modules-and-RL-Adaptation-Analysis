@@ -29,19 +29,28 @@ Research code and documentation for a **survey / empirical paper** on **domain a
 
 ## Quickstart (local smoke test)
 
-Validates imports, data streaming, manifest build, NeMo **or** CPU training step, reward hook, and JSON output **without** spending GCP credits:
+NeMo 2.x needs **Python 3.10+** (`python3.11 -m venv .venv`). Always install with the **same** interpreter you use to run the script (`python -m pip` avoids “pip installed numpy but python can’t import it”):
 
 ```bash
-pip install -r requirements-nemo-train.txt
+python3.11 -m venv .venv && source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements-nemo-train.txt
 python gcp_scripts/nemo_afrispeech_training.py --smoke_test
 ```
+
+If `pip install` says numpy is installed but `import numpy` still fails, run `python -c "import sys; print(sys.executable)"` and confirm it ends with `.../.venv/bin/python`; otherwise use `./.venv/bin/python -m pip install ...`.
+
+If you see **`Dataset scripts are no longer supported, but found afrispeech-200.py`**, your `datasets` package is 3.x. Reinstall with: `python -m pip install "datasets>=2.14.0,<3.0.0"` (already pinned in `requirements-nemo-train.txt`).
+
+If transcribe / dataloader fails with **`np.sctypes` removed in NumPy 2.0**, NeMo’s audio code is not NumPy-2-ready yet: `python -m pip install "numpy>=1.22,<2.0"` (pinned in `requirements-nemo-train.txt`).
 
 Artifacts: `checkpoints/`, `manifests/`, `results/*_results.json`.
 
 ## GCP training
 
-1. Create a GPU VM and bucket (see [`docs/GCP_DEPLOYMENT_GUIDE.md`](docs/GCP_DEPLOYMENT_GUIDE.md)).
-2. Run with durable uploads:
+Full **onboarding** (billing, APIs, GPU quota, bucket, `tmux` so your **laptop can sleep** while the **VM** trains): [`docs/GCP_DEPLOYMENT_GUIDE.md`](docs/GCP_DEPLOYMENT_GUIDE.md) — includes a **paper vs script** checklist.
+
+On the VM, use **`tmux`** (or `nohup`), then:
 
 ```bash
 export GEMINI_API_KEY=...   # only for --real_llm / --reward_mode llm
