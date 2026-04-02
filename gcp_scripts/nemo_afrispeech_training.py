@@ -278,11 +278,15 @@ def load_afrispeech_clinical() -> Tuple[DatasetDict, str]:
         test_samples = _collect_clinical_from_stream(test_stream, CFG.TEST_SAMPLES)
         logger.info("  Test clinical clips: %d (cap=%s)", len(test_samples), CFG.TEST_SAMPLES)
 
+    logger.info("  Decoding train audio (resample 16 kHz) — can take several minutes …")
     train_ds = Dataset.from_list(train_samples).cast_column("audio", Audio(sampling_rate=16_000))
+    logger.info("  Decoding validation audio …")
     val_ds = Dataset.from_list(val_samples).cast_column("audio", Audio(sampling_rate=16_000))
     splits: Dict[str, Any] = {"train": train_ds, "validation": val_ds}
     if test_samples:
+        logger.info("  Decoding test audio …")
         splits["test"] = Dataset.from_list(test_samples).cast_column("audio", Audio(sampling_rate=16_000))
+    logger.info("  AfriSpeech clinical tensors ready (train=%d val=%d test=%d)", len(train_ds), len(val_ds), len(test_samples))
     return DatasetDict(splits), "transcript"
 
 
@@ -345,8 +349,12 @@ def build_nemo_manifest(dataset, split_name: str, audio_dir: str, text_field: st
     manifest_path = os.path.join(CFG.MANIFEST_DIR, f"{split_name}_manifest.json")
     written = 0
     skipped = 0
+    n_total = len(dataset) if hasattr(dataset, "__len__") else None
+    logger.info("  Writing manifest + WAVs for split=%s (%s rows) …", split_name, n_total if n_total is not None else "?")
     with open(manifest_path, "w", encoding="utf-8") as f:
         for i, sample in enumerate(dataset):
+            if i > 0 and i % 500 == 0:
+                logger.info("    %s manifest progress: %d rows scanned, %d written …", split_name, i, written)
             try:
                 audio_array = sample["audio"]["array"]
                 sr = int(sample["audio"]["sampling_rate"])
