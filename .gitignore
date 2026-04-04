@@ -59,7 +59,11 @@ Thumbs.db
 *.swo
 *~
 
-# NeMo / training artifacts (large; regenerate locally or pull from GCS)
+# Raw audio — too large for git
+data/audio/
+!data/audio/.gitkeep
+
+# NeMo / ESPNet training artifacts (large; regenerate locally or pull from GCS)
 checkpoints/
 manifests/
 nemo-afrispeech-output/
@@ -69,6 +73,12 @@ nemo_training.log
 *.log
 lightning_logs/
 wandb/
+nemo/checkpoints/
+nemo/manifests/
+nemo/results/
+espnet/checkpoints/
+espnet/manifests/
+espnet/results/
 
 # HuggingFace / dataset cache (optional; remove these lines if you want HF_CACHE in repo)
 # .cache/
