@@ -1,8 +1,78 @@
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+.python-version
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing / typecheck / linters
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / local env
+.env
+.env.local
+*.pem
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
 # Raw audio — too large for git
 data/audio/
 !data/audio/.gitkeep
 
-# Training artifacts
+# NeMo / ESPNet training artifacts (large; regenerate locally or pull from GCS)
+checkpoints/
+manifests/
+nemo-afrispeech-output/
+results/
+*.nemo
+nemo_training.log
+*.log
+lightning_logs/
+wandb/
 nemo/checkpoints/
 nemo/manifests/
 nemo/results/
@@ -10,17 +80,6 @@ espnet/checkpoints/
 espnet/manifests/
 espnet/results/
 
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-dist/
-build/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# macOS
-.DS_Store
+# HuggingFace / dataset cache (optional; remove these lines if you want HF_CACHE in repo)
+# .cache/
+# ~/.cache/huggingface is outside repo anyway

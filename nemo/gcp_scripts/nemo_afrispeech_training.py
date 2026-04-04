@@ -61,6 +61,18 @@ from lightning.pytorch.callbacks import Callback
 from lightning.pytorch import LightningModule
 from nemo.collections.asr.models import EncDecCTCModelBPE
 
+
+def _require_datasets_script_support() -> None:
+    """HuggingFace `datasets` 3+ no longer runs hub dataset .py scripts (e.g. AfriSpeech)."""
+    parts = _datasets_lib.__version__.split(".")
+    major = int(parts[0]) if parts[0].isdigit() else 0
+    if major >= 3:
+        raise RuntimeError(
+            f"AfriSpeech-200 needs `datasets` < 3 (dataset scripts). You have {_datasets_lib.__version__}. "
+            'Run: python -m pip install "datasets>=2.14.0,<3.0.0"'
+        )
+
+
 # ---------------------------------------------------------------------------
 # Optional Gemini (LLM reward)
 # ---------------------------------------------------------------------------
@@ -1052,6 +1064,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip_zero_shot", action="store_true")
     p.add_argument("--skip_librispeech_forgetting", action="store_true")
     p.add_argument("--skip_test_eval", action="store_true")
+    p.add_argument(
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Train/eval batch size (use 8 on V100 16GB for stt_en_conformer_ctc_medium if OOM)",
+    )
     return p.parse_args()
 
 
@@ -1086,6 +1104,8 @@ def main() -> None:
         CFG.RUN_LIBRISPEECH_FORGETTING = False
     if args.skip_test_eval:
         CFG.RUN_FINAL_TEST_EVAL = False
+    if args.batch_size is not None and not args.smoke_test:
+        CFG.BATCH_SIZE = args.batch_size
 
     set_seed(CFG.SEED)
 

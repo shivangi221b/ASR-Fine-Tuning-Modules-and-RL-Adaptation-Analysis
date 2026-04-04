@@ -57,8 +57,54 @@ All datasets are shared between frameworks. See [`data/README.md`](data/README.m
 
 ## Getting started
 
+NeMo 2.x needs **Python 3.10+** (`python3.11 -m venv .venv`). Always install with the **same** interpreter you use to run the script (`python -m pip` avoids "pip installed numpy but python can't import it"):
+
+```bash
+python3.11 -m venv .venv && source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements-nemo-train.txt
+python nemo/gcp_scripts/nemo_afrispeech_training.py --smoke_test
+```
+
+If `pip install` says numpy is installed but `import numpy` still fails, run `python -c "import sys; print(sys.executable)"` and confirm it ends with `.../.venv/bin/python`; otherwise use `./.venv/bin/python -m pip install ...`.
+
+If you see **`Dataset scripts are no longer supported, but found afrispeech-200.py`**, your `datasets` package is 3.x. Reinstall with: `python -m pip install "datasets>=2.14.0,<3.0.0"` (already pinned in `requirements-nemo-train.txt`).
+
+If transcribe / dataloader fails with **`np.sctypes` removed in NumPy 2.0`**, NeMo's audio code is not NumPy-2-ready yet: `python -m pip install "numpy>=1.22,<2.0"` (pinned in `requirements-nemo-train.txt`).
+
+Artifacts: `checkpoints/`, `manifests/`, `results/*_results.json`.
+
 - **NeMo:** see [`nemo/README.md`](nemo/README.md) for environment setup, quickstart, and GCP training instructions.
 - **ESPNet:** see [`espnet/README.md`](espnet/README.md) for planned work and setup (forthcoming).
+
+## GCP training
+
+Full **onboarding** (billing, APIs, GPU quota, bucket, `tmux` so your **laptop can sleep** while the **VM** trains): [`nemo/docs/GCP_DEPLOYMENT_GUIDE.md`](nemo/docs/GCP_DEPLOYMENT_GUIDE.md) — includes a **paper vs script** checklist.
+
+On the VM, use **`tmux`** (or `nohup`), then:
+
+```bash
+export GEMINI_API_KEY=...   # only for --real_llm / --reward_mode llm
+python nemo/gcp_scripts/nemo_afrispeech_training.py --stage both \
+  --dataset afrispeech_clinical \
+  --upload_gcs gs://adaptive-ai-487419-stt-results/my_experiment \
+  --seed 42
+```
+
+**RL from existing SFT checkpoint:**
+
+```bash
+python nemo/gcp_scripts/nemo_afrispeech_training.py --stage rl \
+  --sft_checkpoint ./checkpoints/sft_model.nemo \
+  --reward_mode wwer
+```
+
+**Useful flags:** `--use_lora` (best-effort NeMo encoder adapter), `--mock_llm` / `--real_llm`, `--skip_zero_shot`, `--skip_librispeech_forgetting`, `--skip_test_eval`, `--voxpopuli_train_subset N`.
+
+## Results persistence
+
+- **`results/<run_id>_results.json`**: config snapshot, zero-shot / SFT / RL metrics (WER, CER, SER, EWER, domain F1), reward trajectory, optional LibriSpeech forgetting, optional **paired bootstrap** p-value, test-split metrics.
+- **`--upload_gcs`**: copies checkpoints and JSON to **Google Cloud Storage** so work survives VM deletion.
 
 ## Citation
 
