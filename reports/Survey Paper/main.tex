@@ -1,0 +1,630 @@
+\documentclass[conference]{IEEEtran}
+
+% *** PACKAGES ***
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{cite}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{xcolor}
+
+\begin{document}
+
+% *** TITLE & AUTHORS ***
+\title{A Survey of Fine-Tuning Frameworks and Reinforcement Learning Tooling for Speech-to-Text}
+
+\author{
+    \IEEEauthorblockN{
+    Gautam Agarwal\IEEEauthorrefmark{1},
+    Shivangi Kumar\IEEEauthorrefmark{1},
+    Chen Wang\IEEEauthorrefmark{2}}
+    \IEEEauthorblockA{\IEEEauthorrefmark{1}Department of Computer Science, Columbia University, New York, USA\\
+    Email: \{first.last\}@example.edu}
+    \IEEEauthorblockA{\IEEEauthorrefmark{2}IBM Research Center, New York, USA\\
+    Email: second@example.com}
+}
+
+\maketitle
+
+% *** ABSTRACT & INDEX TERMS ***
+\begin{abstract}
+% TODO: 150--250 word summary of:
+% - Motivation: domain shift, static STT deployments, lack of self-adaptation
+% - Scope: survey of STT fine-tuning toolkits (NeMo, ESPNet, Align-SLM / SpeechLM)
+%          and RL/RLHF frameworks used for model alignment
+% - Contributions: taxonomy, framework analyses, experiments, and gap analysis
+% - Outcome: design requirements for self-adaptive STT, to be addressed in follow-up work
+\end{abstract}
+
+\begin{IEEEkeywords}
+Speech-to-Text, Reinforcement Learning, RLHF, Continuous Learning, Fine-Tuning, NeMo, ESPNet, Align-SLM
+\end{IEEEkeywords}
+
+% *** MAIN BODY ***
+
+\section{Introduction}
+% A. Motivation and Problem Context
+% - Degradation of STT under domain shift, noise, accents
+% - Limitations of static training + periodic manual retraining
+% - Lack of closed-loop, self-improving STT systems
+
+% B. Scope and Survey Objectives
+% - Survey STT fine-tuning frameworks: NeMo, ESPNet, Align-SLM / SpeechLM toolkits
+% - High-level scan of RL/RLHF frameworks relevant to STT (VERL, TRL, DeepSpeed-Chat, etc.)
+% - Focus on identifying design gaps rather than proposing a full solution
+
+% C. Contributions and Paper Organization
+% - Taxonomy of STT fine-tuning frameworks
+% - Mapping between STT toolchains and RL/RLHF components
+% - Experimental comparison on shared datasets and metrics
+% - Gap analysis and research opportunities, motivating follow-up work
+
+\label{sec:introduction}
+
+\subsection{Motivation and Problem Context}
+
+Modern speech-to-text (STT) systems have achieved impressive performance on standard benchmarks, yet their accuracy degrades substantially when deployed in real-world environments characterized by domain shift, background noise, and diverse speaker accents. Production audio streams often differ markedly from training corpora along dimensions such as vocabulary, speaking style, channel characteristics, and acoustic conditions, leading to rising word error rates (WER) and unstable user experience over time. This mismatch is exacerbated in specialized settings---for example, clinical, legal, or call-center domains---where terminology, discourse structure, and recording setups are highly domain-specific.
+
+The dominant operational paradigm today is to treat STT models as static assets: models are pre-trained once on large general-purpose corpora, optionally fine-tuned on a fixed domain dataset, and then frozen for deployment. When performance eventually drifts, organizations resort to periodic manual retraining cycles that require costly data curation, human annotation, and engineering effort to refresh checkpoints. Such workflows are reactive rather than proactive, incur substantial latency between error detection and remediation, and often ignore many potentially informative signals available in production (e.g., user corrections or downstream task failures).
+
+Crucially, most deployed STT pipelines lack a closed-loop mechanism by which the system can autonomously detect its own systematic errors, turn these errors into training signals, and schedule fine-tuning in a way that balances accuracy gains against computational cost. While recent work on agentic and self-learning systems has demonstrated the feasibility of generate–critique–improve loops in other modalities, analogous architectures for STT remain underexplored, and existing tools offer limited support for truly self-improving speech recognition in production environments.
+
+\subsection{Scope and Survey Objectives}
+
+This survey focuses on the fine-tuning and adaptation capabilities of three representative STT toolchains: NVIDIA NeMo, ESPnet/ESPnet2, and Align-SLM together with emerging SpeechLM-style toolkits. These frameworks provide configurable recipes, pre-trained acoustic and sequence-to-sequence models, and parameter-efficient fine-tuning mechanisms that are widely used in research and practice. We examine how each framework structures its training pipeline, exposes configuration hooks, and supports domain adaptation workflows relevant to long-lived STT deployments.
+
+Complementing this STT-centric view, we conduct a high-level scan of modern reinforcement learning and reinforcement learning from human or AI feedback (RL/RLHF) frameworks, including VERL, Hugging Face TRL, DeepSpeed-Chat (DeepSpeed-RLHF), OpenRLHF, TRLX, RL4LMs, and Ray RLlib, among others. These libraries provide algorithmic and systems infrastructure for on-policy and off-policy optimization (e.g., PPO- and GRPO-style methods, preference optimization) that has so far been applied primarily to large language models rather than speech recognition. Our goal is not to provide an exhaustive RLHF survey, but to assess to what extent such frameworks can be repurposed to drive self-adaptive STT.
+
+Throughout the paper, the emphasis is on identifying design gaps and integration challenges rather than proposing a single, fully specified new solution. In particular, we analyze how current STT toolchains and RL/RLHF frameworks fall short of providing out-of-the-box support for closed-loop, feedback-driven speech systems and distill a set of design requirements that any future self-learning STT framework should satisfy.
+
+\subsection{Contributions and Paper Organization}
+
+This survey makes four primary contributions. First, we develop a taxonomy of STT fine-tuning frameworks along dimensions such as model architectures (CTC, transducer, encoder–decoder), adaptation strategies (full fine-tuning, parameter-efficient fine-tuning, domain and speaker adaptation), data and configuration pipelines, and extensibility of the training loop. This taxonomy highlights common design patterns and exposes where existing frameworks natively support, or actively hinder, more dynamic learning schemes.
+
+Second, we propose a conceptual mapping between STT toolchains and RL/RLHF components, viewing ASR frameworks as environments and policies whose behaviors could, in principle, be optimized by external controllers. We identify how elements such as data loaders, loss functions, beam search decoders, and evaluation metrics relate to RL notions of states, actions, rewards, and rollout buffers, and we discuss where current APIs provide or lack the hooks required to instantiate such a mapping.
+
+Third, we outline an experimental protocol for comparing NeMo, ESPnet, and Align-SLM/SpeechLM-style toolkits on shared datasets and evaluation metrics. The protocol spans conventional supervised fine-tuning as well as continual-learning scenarios that simulate domain shift, leveraging a unified evaluation stack with metrics such as WER, character error rate (CER), diarization error rate (DER), and domain-specific error measures. These experiments, conducted on both public and application-specific corpora, provide empirical evidence about the strengths and limitations of each framework as a substrate for self-adaptive STT.
+
+Finally, based on our taxonomy, mapping, and experiments, we perform a systematic gap analysis that surfaces missing capabilities at the intersection of STT fine-tuning and RL/RLHF tooling. We articulate open research questions and design opportunities, arguing that an effective self-adaptive STT framework must integrate replay-based continual learning, reward-driven objectives over rich speech and semantic metrics, and cost-aware scheduling into a unified, production-ready stack. We deliberately leave the concrete instantiation of such a framework to future work, which this survey is intended to motivate.
+
+\section{Background and Problem Setting}
+% A. Modern STT Architectures and Supervised Fine-Tuning
+% - Brief overview of encoder--decoder, CTC, RNN-T, Conformer-based models
+% - Standard supervised fine-tuning loop and metrics (WER, CER, etc.)
+
+% B. Reinforcement Learning and RLHF for Sequence Models
+% - RL basics for sequence modeling (policies, rewards, trajectories)
+% - RLHF pipeline: SFT, reward modeling, PPO/GRPO/DPO, RLAIF
+
+% C. Continuous and Lifelong Learning in STT
+% - Catastrophic forgetting, backward transfer, replay buffers
+% - Scheduling problem: when to fine-tune under cost constraints
+\label{sec:background}
+
+\subsection{Modern STT Architectures and Supervised Fine-Tuning}
+
+Contemporary speech-to-text (STT) systems are typically built on encoder--decoder architectures that transform raw waveforms into text sequences via deep neural acoustic encoders and sequence decoders. Widely adopted designs include convolutional or convolutional–self-attention front-ends followed by Transformer or Conformer encoders, which operate on log-mel or learned features and produce hidden representations at frame or sub-sampled time resolutions. On top of these encoders, systems commonly employ either connectionist temporal classification (CTC), recurrent neural network transducer (RNN-T), or hybrid CTC/attention decoders, each defining a distinct training objective and decoding strategy for mapping acoustic frames to token sequences.
+
+In Conformer-based models, self-attention layers are augmented with convolutional modules and macaron-style feed-forward blocks to better capture both local and global temporal dependencies, and are instantiated at varying depths and widths across standard ASR recipes. Toolkits such as ESPnet2 and NVIDIA NeMo expose configuration-driven pipelines in which users specify encoder and decoder types, CTC weights, label smoothing, and auxiliary losses in YAML files that are compiled into full training graphs. These frameworks also provide data front-ends, SpecAugment-based perturbations, and optional language models for shallow fusion or rescoring, yielding end-to-end training and inference stacks for large-vocabulary continuous speech recognition.
+
+The standard supervised fine-tuning loop starts from a pre-trained acoustic or encoder–decoder model and adapts it on a target-domain dataset via mini-batch stochastic gradient descent on cross-entropy, CTC, or hybrid objectives. Typical domain adaptation recipes freeze part of the encoder, adjust learning-rate schedules (e.g., warm-up followed by inverse-square-root decay), and use reduced batch sizes and early stopping tuned to downstream validation metrics. Evaluation relies on sequence-level metrics such as word error rate (WER) and character error rate (CER), often complemented by diarization error rate (DER), verb error rate, and domain-specific error measures in application-focused studies. Frameworks like ESPnet2 provide unified evaluation scripts that compute WER/CER on held-out sets and can log per-utterance errors, beam scores, and token-level information for subsequent analysis.
+
+\subsection{Reinforcement Learning and RLHF for Sequence Models}
+
+Reinforcement learning (RL) for sequence modeling treats the model as a conditional policy that generates token sequences in response to input contexts, with learning signals derived from a reward function defined over complete trajectories. Given an input $x$ (e.g., an audio segment or prompt), a policy $\pi_\theta$ produces an output sequence $y = (y_1, \dots, y_T)$, which is evaluated by a task-specific reward $R(x, y)$, and the objective is to maximise the expected return $\mathbb{E}_{y \sim \pi_\theta(\cdot \mid x)}[R(x, y)]$ via gradient-based updates. Policy gradient methods such as REINFORCE optimise this objective using Monte Carlo estimates of $\nabla_\theta \log \pi_\theta(y \mid x)$ weighted by rewards or advantages, optionally with variance-reduction baselines.
+
+Reinforcement learning from human feedback (RLHF) and related paradigms adapt this RL view to align large sequence models with human or AI preferences. A typical RLHF pipeline begins with supervised fine-tuning (SFT) of a base model on instruction–response pairs to establish a reasonable initial policy. Next, a reward model is trained on pairwise preference data, where human or AI annotators indicate which of two responses is preferred, yielding a learned scalar reward function $r_\phi(x, y)$ that approximates latent quality judgments. Finally, on-policy RL algorithms such as proximal policy optimization (PPO) or group relative policy optimization (GRPO) iteratively sample rollouts from the current policy, score them with the reward model, and update the policy to increase expected reward while constraining divergence from a reference model.
+
+Beyond PPO-style methods, recent work has explored direct preference optimization (DPO) and related objectives that optimise implicit likelihood ratios between preferred and dispreferred responses without an explicit policy-gradient loop. Reinforcement learning from AI feedback (RLAIF) further replaces human raters with strong teacher models that generate preference labels, enabling scalable alignment at the cost of potential bias transfer. Modern RLHF and RLAIF frameworks (e.g., VERL, OpenRLHF, DeepSpeed-Chat, TRL, TRLX, RL4LMs) provide implementations of these algorithms, together with infrastructure for distributed rollout generation, reward modeling, and multi-turn agentic workflows, primarily for text-based large language models.
+
+\subsection{Continuous and Lifelong Learning in STT}
+
+Continuous and lifelong learning aim to enable models to absorb new information over time while retaining performance on previously learned tasks or domains. In the STT setting, this corresponds to scenarios where deployed systems encounter evolving input distributions due to new accents, acoustic conditions, domains, or recording hardware, and must adapt without catastrophic forgetting of earlier conditions. Catastrophic forgetting arises when fine-tuning on new data dramatically degrades accuracy on earlier domains, while backward transfer measures whether learning on later tasks improves or harms performance on prior ones.
+
+Replay buffers are a standard tool for mitigating forgetting by maintaining a curated subset of past examples that are interleaved with new data during retraining, approximating a mixture of historical and current distributions. In speech applications, such buffers can store audio–transcript pairs drawn from prior domains, synthetic “oracle” transcripts generated by large language models, or automatically corrected outputs from online post-editing modules. Lifelong-learning experiments for STT therefore often compare naive sequential fine-tuning against replay-enhanced strategies under controlled task sequences and drift protocols, tracking both in-domain and cross-domain WER trajectories as new data are introduced.
+
+A central challenge in continuous STT learning is the scheduling problem: deciding when and how aggressively to fine-tune under compute, latency, and budget constraints. Frequent updates can reduce lag between distribution shift and adaptation but may be prohibitively expensive in GPU hours or cloud cost, whereas infrequent retraining risks prolonged periods of degraded user experience. Recent work has proposed adaptive schedulers that monitor validation metrics, cost efficiency, and signs of diminishing returns to trigger fine-tuning only when additional gains justify the computational expense, but such mechanisms are not yet integrated into mainstream STT toolkits. Bridging the gap between these continual-learning desiderata and the capabilities of existing ASR and RL/RLHF frameworks is therefore a key problem this survey seeks to characterise.
+
+\section{Survey Methodology and Evaluation Protocol}
+% A. Framework Selection Criteria
+% - Inclusion criteria for STT toolkits and RL/RLHF frameworks
+% - Versioning and documentation sources
+
+% B. Experimental Protocol for STT Frameworks
+% - Datasets: list and characteristics (clean, noisy, domain-specific)
+% - Metrics: WER, CER, DER, Verb Error Rate, Domain Error Rate, latency, cost
+
+% C. Reproducibility Setup
+% - Docker images, GCP or cluster configuration (high level)
+% - Random seeds, hyperparameter ranges
+\pagebreak
+
+\section{Taxonomy of STT Fine-Tuning Frameworks}
+% A. Taxonomy Dimensions
+% - Model support (CTC, RNN-T, encoder--decoder, streaming/offline)
+% - Adaptation strategies (full FT, PEFT, multi-stage training)
+% - Data/recipe ecosystems and configuration styles
+
+% B. RL Alignment and Control Hooks as a Taxonomy Dimension
+% - Where reward signals can be injected (loss abstraction, scorers)
+% - Modularity of training loops; logging, replay, online/incremental support
+
+% (Optional) C. Summary Table
+% - Table: frameworks vs. taxonomy dimensions
+% \begin{table}[t]
+% \centering
+% \caption{Taxonomy of STT Fine-Tuning Frameworks}
+% \begin{tabular}{lccc}
+% \toprule
+% Framework & Model Types & PEFT & RL Hooks \\
+% \midrule
+% NeMo     & ... & ... & ... \\
+% ESPNet   & ... & ... & ... \\
+% Align-SLM / SpeechLM & ... & ... & ... \\
+% \bottomrule
+% \end{tabular}
+% \label{tab:taxonomy}
+% \end{table}
+
+
+\label{sec:taxonomy}
+
+\subsection{Taxonomy Dimensions}
+
+To reason systematically about the suitability of existing speech toolkits as substrates for self-adaptive STT, we first introduce a taxonomy along three primary dimensions: model support, adaptation strategies, and data/recipe ecosystems.
+
+\textbf{Model support.}
+Frameworks differ in the families of acoustic and sequence models they support, as well as in their coverage of streaming versus offline decoding.
+NVIDIA NeMo provides Conformer and FastConformer encoders with both CTC and RNN-T decoders, supporting non-autoregressive transcription as well as streaming-capable transducer models configured via YAML files and Python scripts.
+ESPnet2 exposes a broader catalog of encoder--decoder ASR architectures, including Conformer, Transformer, Branchformer, transducer, and streaming Conformer variants, instantiated through task-specific recipes with configurable CTC/attention hybrids and language model integration.
+Align-SLM and emerging SpeechLM-style toolkits focus on spoken language models that operate directly on speech tokens; while not conventional ASR systems, they nonetheless provide speech-conditioned sequence models that can be aligned via preference-based objectives.
+
+\textbf{Adaptation strategies.}
+All three families support supervised domain adaptation, but they differ in how fine-grained their control over parameter updates and schedules is.
+NeMo offers full fine-tuning as well as parameter-efficient fine-tuning (PEFT) mechanisms such as LoRA, adapter modules, and IA3-style rescaling, implemented via model transforms that wrap selected linear layers while leaving the base model frozen.
+ESPnet2 exposes adaptation through configuration-level controls such as \texttt{init\_param} and \texttt{freeze\_param} for loading and partially freezing pretrained checkpoints, SpecAugment and front-end choices for robustness, and warm-up learning-rate schedulers tuned for fine-tuning on smaller domain-specific datasets.
+SpeechLM-style stacks and Align-SLM typically inherit PEFT strategies from LLM tooling (e.g., LoRA-based adapters over Transformer blocks), enabling low-rank adaptation of large speech LMs to new domains while keeping most parameters fixed.
+
+\textbf{Data and recipe ecosystems.}
+Both NeMo and ESPnet2 provide rich recipe ecosystems that encode best practices for corpus preparation, model configuration, and evaluation.
+NeMo uses manifest-based data loaders (JSON with audio paths and transcripts), tarred dataset support, bucketing by utterance length, and centralized configuration files for specifying model, optimizer, and scheduler settings within a PyTorch Lightning training loop.
+ESPnet2 organises recipes by corpus (e.g., LibriSpeech, AISHELL), with shell scripts orchestrating multi-stage pipelines for data preparation, BPE training, ASR and LM training, checkpoint averaging, and decoding, backed by YAML configs that map directly into front-end, encoder, decoder, CTC, and optimizer constructors.
+Align-SLM and SpeechLM toolkits are instead centred around speech LM pretraining and alignment tasks, with recipes that emphasise preference data construction, semantic metrics, and RLAIF-style training over speech continuations rather than classic ASR benchmarks.
+
+\subsection{RL Alignment and Control Hooks as a Taxonomy Dimension}
+
+For self-adaptive STT, a critical additional axis is the extent to which a framework exposes alignment and control hooks suitable for reinforcement learning or RLHF-style training.
+We characterise this along two sub-dimensions: reward injection points and training-loop modularity.
+
+\textbf{Reward injection and loss abstraction.}
+In NeMo, ASR models implement loss computation inside task-specific modules that by default combine CTC or RNN-T criteria with optional auxiliary losses; replacing these with reward-based objectives requires overriding internal loss functions or extending model classes but is conceptually straightforward.
+ESPnet2 provides a more explicit scaffold via \texttt{RLESPnetModel}, where a policy-gradient loss term can be computed alongside the standard CTC/attention loss, with a blending weight \texttt{rl\_weight} controlling the trade-off, and rewards derived from per-utterance metrics such as WER.
+Align-SLM and SpeechLM toolkits, by design, include preference-based alignment objectives (e.g., DPO-style losses or RLAIF pipelines) that directly treat learned or AI-generated preference scores as optimisation targets, effectively providing first-class reward injection points for speech models even if these are not currently tied to ASR-style WER.
+
+\textbf{Training-loop modularity, logging, and replay.}
+From a control perspective, it is important that the training loop can be modularised into rollout, scoring, and update phases, and that it exposes sufficient logging for constructing replay buffers and offline analyses.
+NeMo relies on PyTorch Lightning trainers that encapsulate the core optimisation loop; while users can inject callbacks and custom hooks, on-policy RL or off-policy replay typically require more intrusive modifications to separate inference-only rollouts from gradient steps.
+ESPnet2’s trainer is implemented at the framework level with clear separation between \texttt{train\_one\_epoch} and inference stages; customised binaries such as \texttt{asr\_inference\_with\_logging.py} already log per-utterance hypotheses, scores, and WER to JSONL, enabling reward computation and offline policy-gradient experiments without changing the trainer.
+More advanced RL algorithms like PPO would nonetheless require new trainers that decouple rollout collection from learning and manage reference policies and value heads, but these can reuse ESPnet2’s distributed infrastructure.
+SpeechLM and Align-SLM stacks that implement DPO or RLAIF integrate rollout and optimisation loops explicitly for speech LMs, exposing interfaces for preference scoring and trajectory-level rewards; however, they currently target generative speech tasks and do not yet provide streaming or CTC-aware control loops suitable for production ASR.
+
+Overall, viewing ``RL alignment and control hooks'' as a taxonomy dimension highlights that NeMo and ESPnet2 are optimised for supervised fine-tuning with varying degrees of extensibility, while Align-SLM/SpeechLM-style frameworks natively support preference-based alignment but do not yet address core ASR requirements such as low-latency decoding and WER-optimised training.
+
+\subsection{Summary Table}
+
+Table~\ref{tab:taxonomy} summarises the taxonomy dimensions across the three framework families at a high level.
+
+\begin{table}[t]
+\centering
+\caption{Taxonomy of STT Fine-Tuning Frameworks}
+\begin{tabular}{lccc}
+\toprule
+Framework & Model Types & PEFT Support & RL / Alignment Hooks \\
+\midrule
+NeMo &
+Conformer, FastConformer; &
+LoRA, adapters, IA3; &
+Custom loss overrides; \\
+      &
+CTC and RNN-T;        &
+layer freezing;        &
+Lightning callbacks; no native PPO \\
+      &
+streaming and offline &
+multi-stage recipes    &
+or replay buffer API   \\
+\midrule
+ESPnet2 &
+Conformer, Transformer, &
+Config-level init/freeze; &
+\texttt{RLESPnetModel} and \texttt{RLTrainer} for \\
+        &
+Branchformer, RNN-T;  &
+SpecAug, warm-up schedulers; &
+REINFORCE; reward-model scorer \\
+        &
+streaming and offline &
+recipe-based domain adaptation &
+and JSONL prediction logs \\
+\midrule
+Align-SLM / &
+Spoken language models &
+LoRA-style adapters via &
+Built-in preference-based \\
+SpeechLM &
+over speech tokens;    &
+LLM stacks (task-dependent) &
+alignment (DPO/RLAIF) for \\
+        &
+non-ASR generative tasks &
+                    &
+speech continuations; no WER-focused RL \\
+\bottomrule
+\end{tabular}
+\label{tab:taxonomy}
+\end{table}
+
+
+\section{NVIDIA NeMo for STT Fine-Tuning}
+% A. Framework Overview
+% - ASR pipeline: data loaders, models, loss functions, config-driven training
+
+% B. Fine-Tuning Strategies
+% - Full fine-tuning vs LoRA/adapters/BitFit and their parameter efficiency
+% - Domain/speaker adaptation examples
+
+% C. RL/RLHF Compatibility Analysis
+% - Existing RLHF support (NeMo-Aligner for LLMs)
+% - Feasibility of integrating reward-based objectives for STT
+% - Limitations for online and streaming RL
+
+\label{sec:nemo}
+
+\subsection{Framework Overview}
+
+NVIDIA NeMo is a modular toolkit for developing speech, language, and multimodal models, with a mature automatic speech recognition (ASR) stack built around Conformer and FastConformer encoders paired with CTC or RNN-T decoders.
+ASR models are configured through YAML files that specify encoder and decoder architectures, tokenizers, optimizers, and schedulers, and are trained using PyTorch Lightning trainers that handle distributed data parallelism, mixed-precision training, checkpointing, and validation.
+The data layer relies on manifest files in JSON format containing audio paths and transcripts, supports tarred datasets for large-scale training, and implements bucketing by utterance length together with augmentation techniques such as SpecAugment, time-stretching, and pitch shifting to improve robustness.
+
+FastConformer extends the Conformer design with aggressive temporal downsampling via depthwise-separable convolutions and optional long-context attention, enabling efficient training on long-form audio, while CTC and RNN-T decoders provide non-autoregressive and streaming-capable recognition modes, respectively.
+Loss computation is encapsulated inside the ASR model classes, which support standard CTC loss, RNN-T loss with a joint network over encoder and prediction states, and hybrid or InterCTC variants that attach auxiliary CTC losses to intermediate encoder layers.
+The generic \texttt{speech\_to\_text\_finetune.py} script orchestrates fine-tuning by loading pretrained checkpoints (from local \texttt{.nemo} files or NGC/Hugging Face hubs), handling tokenizer and vocabulary alignment, setting up training and validation manifests, and running a validation loop that periodically computes WER and preserves the best-performing checkpoints.
+
+\subsection{Fine-Tuning Strategies}
+
+NeMo supports a spectrum of fine-tuning strategies ranging from full model adaptation to parameter-efficient approaches that update only small subsets of parameters.
+In the full fine-tuning regime, all weights of the encoder and decoder are updated on the target-domain corpus using optimizers such as AdamW or SGD with Hydra-configured learning-rate schedules (e.g., warm-up followed by cosine decay), providing strong adaptation at the cost of high memory usage and a larger risk of overfitting when domain data are limited.
+For a typical 120\,M-parameter FastConformer model, full fine-tuning involves updating all \(\sim 120\,\text{M}\) parameters, whereas LoRA with rank 32 targeted at encoder linear layers reduces the number of trainable parameters to roughly 1--2\,M (\(\approx 1.7\%\)), and adapter modules with moderate bottleneck sizes yield 3--5\,M trainable parameters (\(\approx 3\%\)).
+
+Parameter-efficient fine-tuning (PEFT) in NeMo 2.0 is implemented through ``model transforms'' that wrap selected modules at the start of training, turning standard linear layers into LoRA-augmented layers or inserting Houlsby-style adapter bottlenecks and IA3 re-scaling modules.
+These transforms are configured by specifying target module names or prefixes (e.g., attention projections, feed-forward layers), and can in principle be applied to ASR encoders, although most documentation and examples currently focus on large language models, making ASR-specific PEFT recipes less mature and requiring custom code to integrate with ASR training scripts.
+Beyond PEFT, NeMo supports domain and speaker adaptation through layer-wise learning-rate schedules and staged freezing, for example by freezing lower encoder blocks for initial epochs before unfreezing them, and by adjusting warm-up steps and base learning rates to stabilise fine-tuning on smaller or more specialised corpora.
+
+In practical domain adaptation workflows, users typically start from a pretrained Conformer or FastConformer checkpoint, load new manifests for the target domain, optionally freeze lower encoder layers, and fine-tune with a reduced learning rate and batch size while monitoring validation WER and saving the best checkpoint according to task-specific metrics.
+Speaker or environment-specific adaptation can be achieved by further fine-tuning on speaker-clustered or environment-filtered subsets of data, with PEFT methods providing a way to maintain separate lightweight adapters per domain or speaker group while reusing a shared base model.
+These strategies make NeMo a flexible platform for supervised adaptation, even though out-of-the-box recipes for aggressive continual-learning or replay-based adaptation are not yet standardised.
+
+\subsection{RL/RLHF Compatibility Analysis}
+
+NeMo includes dedicated RLHF tooling for large language models, most notably NeMo-Aligner, which provides infrastructure for supervised fine-tuning, reward modeling from preference data, and PPO/GRPO-style RLHF training on text-based LLMs.
+This stack leverages NeMo’s model-transform and trainer abstractions to apply PEFT (e.g., LoRA) to LLMs, integrate custom reward functions, and orchestrate distributed RLHF runs, but it is architected primarily around token-level language models rather than ASR encoders and decoders.
+Consequently, while NeMo as a whole is RLHF-aware, its ASR-specific components do not expose ready-made RLHF recipes or APIs analogous to those available for LLM alignment.
+
+From an architectural standpoint, integrating reward-based objectives into NeMo’s ASR models is feasible but requires targeted modifications.
+ASR models centralise loss computation in methods such as \texttt{\_compute\_loss()}, which currently construct CTC, RNN-T, or hybrid objectives from encoder and decoder outputs; replacing or augmenting these losses with reward-based terms (e.g., functions of WER, semantic similarity, or downstream task metrics) would involve extending these methods to accept externally computed rewards and to form blended objectives of the form \(\mathcal{L}_{\text{total}} = (1 - \lambda)\,\mathcal{L}_{\text{sup}} + \lambda\,\mathcal{L}_{\text{RL}}\).
+Similarly, policy-gradient updates could be approximated by treating negative rewards as pseudo-losses attached to entire utterances or sequences, provided that NeMo’s decoders expose log-probabilities of hypotheses and that the training scripts are adapted to switch between teacher-forced and sampled decoding modes.
+In principle, NeMo’s model-transform system could also be used to attach additional heads (e.g., value estimators) to ASR encoders for critic networks in actor–critic or PPO-style algorithms, though this would require new trainer logic beyond the existing supervised pipelines.
+
+However, several limitations make online and streaming RL for STT non-trivial in NeMo’s current ASR stack.
+First, the PyTorch Lightning trainers are designed around epoch-based supervised training loops rather than decoupled rollout and update phases; implementing on-policy RL (e.g., PPO) or asynchronous off-policy methods would require refactoring trainers to separate inference-only rollout collection from gradient updates and to manage reference policies and replay buffers.
+Second, NeMo’s ASR APIs are geared toward offline batch training and evaluation, with streaming ASR supported at inference time but not tightly integrated into a training loop that could consume live feedback or streaming rewards.
+Third, while the RLHF components for LLMs provide abstractions for reward models and rollout engines, they do not currently offer CTC- or RNN-T-aware reward computation, beam-search integration, or per-utterance WER-based rewards for ASR, implying that substantial glue code would be needed to adapt them for speech recognition tasks.
+
+In summary, NeMo offers a strong foundation for supervised STT fine-tuning and a separate, well-engineered RLHF stack for LLMs, but there is a gap between these two worlds: ASR models lack first-class RL alignment hooks, standard reward abstractions, and streaming-compatible training loops, making NeMo a capable but incomplete substrate for building fully self-adaptive, RL-driven STT systems today.
+
+\section{ESPNet and ESPnet-SpeechLM}
+% A. ESPNet Overview
+% - ASR and broader speech toolkit; recipe structure, hybrid CTC/attention models
+
+% B. Fine-Tuning and Adaptation Mechanisms
+% - Domain/speaker adaptation recipes; configuration hooks
+
+% C. RLHF and Preference-Based Learning
+% - ESPnet-SpeechLM and RLHF capabilities
+% - Applicability to STT and gaps (WER, streaming, deployment constraints)
+\label{sec:espnet}
+
+\subsection{ESPnet Overview}
+
+ESPnet and its successor ESPnet2 form a general-purpose end-to-end speech processing toolkit that supports ASR, text-to-speech, speech translation, enhancement, diarization, and other tasks through a unified recipe-based interface.
+For ASR, ESPnet2 provides a rich catalog of encoder--decoder architectures, including Conformer, Transformer, Branchformer, RNN-T, and streaming Conformer variants, instantiated via YAML configuration files and orchestrated by corpus-specific shell scripts (e.g., \texttt{egs2/librispeech/asr1/asr.sh}).
+Hybrid CTC/attention models are the default, with a scalar \texttt{ctc\_weight} blending frame-synchronous CTC loss and sequence-to-sequence attention loss, and optional external language models integrated via shallow fusion during decoding.
+
+Recipes are organised into multi-stage pipelines guarded by \texttt{stage} and \texttt{stop\_stage} flags: data download and preparation, subword (BPE) tokenizer training, optional language-model training, ASR training, checkpoint averaging, and decoding and scoring.
+The LibriSpeech ASR recipe, for example, trains a Conformer encoder with a Transformer decoder and CTC/attention hybrid loss, then performs N-best checkpoint averaging and beam-search decoding with configurable \texttt{beam\_size}, \texttt{ctc\_weight}, and \texttt{lm\_weight}, before computing WER using SCTK’s \texttt{sclite} or a Python alternative.
+Pretrained models hosted in the \texttt{espnet\_model\_zoo} can be downloaded and evaluated directly via subset scripts that replicate the decoding stage, enabling rapid experimentation and validation without full retraining.
+
+\subsection{Fine-Tuning and Adaptation Mechanisms}
+
+ESPnet2’s fine-tuning and domain adaptation workflows are built on top of a flexible training core implemented in \texttt{espnet2/train/trainer.py} and a set of configuration hooks that control initialisation, freezing, schedulers, and robustness modules.
+The core training loop accumulates gradients over \texttt{accum\_grad} mini-batches, applies global gradient clipping, and steps one or more optimizers and batch-step schedulers (e.g., \texttt{WarmupLR}) at each effective update, while epoch-level schedulers (e.g., \texttt{WarmupReduceLROnPlateau}) adjust learning rates based on validation metrics.
+Model construction is handled by \texttt{ASRTask.build\_model()}, which composes front-ends, SpecAugment, encoders, decoders, and CTC heads from YAML sections such as \texttt{encoder\_conf}, \texttt{decoder\_conf}, \texttt{specaug\_conf}, and \texttt{ctc\_conf}, providing a clean mapping from configuration files to concrete architectures.
+
+Domain and speaker adaptation rely on a combination of initialisation and freezing controls, scheduler choices, and data selection.
+The \texttt{init\_param} key allows fine-tuning to start from an existing checkpoint, while \texttt{freeze\_param} lists module names (e.g., lower encoder layers) that should remain frozen, enabling partial adaptation of higher layers to new domains.
+YAML templates for fine-tuning typically reduce the learning rate (e.g., base \(\mathrm{lr} = 10^{-4}\)), shorten warm-up schedules, decrease \texttt{batch\_bins}, and increase SpecAugment strength relative to full training recipes, reflecting the smaller size and higher overfitting risk of domain-specific datasets.
+Corpus-specific configs (LibriSpeech, AISHELL) demonstrate standard choices—Conformer encoders with hybrid CTC/attention decoders, Adam optimizers, and warm-up LR schedulers—that can be reused or adapted for new domains and languages.
+
+On the evaluation side, ESPnet2 provides an extended validation and logging pipeline that is especially relevant for continual-learning and RL-style experiments.
+Custom binaries such as \texttt{espnet2/bin/asr\_inference\_with\_logging.py} run beam-search decoding over subsets of data and emit JSONL logs containing utterance IDs, hypotheses, references, per-utterance WER, beam scores, and token sequences.
+These logs can be used to compute aggregate WER and CER, as well as to simulate reward signals (e.g., \(1 - \text{WER}\)) and per-utterance log-probabilities for analysis or offline policy-gradient experiments, without modifying the core trainer.
+
+\subsection{RLHF and Preference-Based Learning}
+
+Beyond supervised ASR, the ESPnet ecosystem now includes ESPnet-SpeechLM, a toolkit for speech language models and voice agents that extends ESPnet2’s infrastructure to speech-conditioned generative models and RLHF-style alignment.
+SpeechLM-style models operate over sequences of speech tokens (e.g., discrete units learned from audio) and support tasks such as speech continuation, dialog generation, and multi-modal interaction, with recipes that incorporate preference-based objectives and reinforcement learning from AI feedback (RLAIF) to align outputs with semantic and stylistic targets.
+These recipes typically follow the familiar RLHF pipeline: supervised pretraining on paired speech–text or speech–speech data, reward modeling or direct preference optimization on preference-labeled trajectories, and on-policy updates using algorithms such as PPO or DPO variants tuned for speech LMs.
+
+Within the ASR stack itself, ESPnet2 offers an explicit scaffold for reinforcement learning extensions through \texttt{RLESPnetModel} and \texttt{RLTrainer}.
+In this design, the trainer injects an \texttt{rl\_weight} into each batch, and the model’s \texttt{forward} method computes both the conventional supervised loss (CTC/attention) and a policy-gradient loss term based on decoded hypotheses and per-utterance rewards, blending them via a template of the form \(\mathcal{L}_{\text{total}} = (1 - \lambda)\,\mathcal{L}_{\text{CE}} + \lambda\,\mathcal{L}_{\text{PG}}\).
+Per-utterance WER can be computed inside the model using built-in or external scorers (e.g., \texttt{jiwer}), and JSONL prediction logs produced by \texttt{asr\_inference\_with\_logging.py} mirror the same reward computations, enabling offline analysis and debugging of reward distributions before committing to full RL training runs.
+
+Despite these advances, several gaps remain when considering RLHF and preference-based learning specifically for production STT.
+ESPnet-SpeechLM’s RLHF capabilities are tailored to speech LMs and generative tasks rather than to CTC- or transducer-based ASR optimised for WER, so they do not directly expose WER-aware reward models, CTC-aligned decoding objectives, or streaming constraints.
+Within ESPnet2, the REINFORCE-style integration in \texttt{RLESPnetModel} is well-suited for initial experiments but does not yet provide complete support for more sample-efficient algorithms such as PPO, which would require dedicated rollout buffers, reference policies, critic networks, and separate rollout and learning phases.
+Furthermore, while ESPnet2 offers streaming Conformer architectures and recipes, RL and RLHF integration remains primarily offline and batch-oriented, lacking mechanisms for real-time reward ingestion, latency-aware rewards, or deployment-friendly adaptation loops that can operate under strict production constraints.
+
+Overall, ESPnet and ESPnet-SpeechLM provide one of the most extensible and RL-aware foundations among current speech toolkits, with explicit hooks for reward-based optimisation and emerging support for speech LM RLHF.
+However, turning these capabilities into a turnkey solution for self-adaptive STT still requires bridging gaps around WER- and CER-centric reward modeling, streaming and low-latency operation, and robust deployment workflows that can safely run RL-driven updates in production environments.
+
+\section{Align-SLM as a Speech RL Alignment Case Study}
+% A. Align-SLM Overview
+% - Textless spoken language modeling
+% - RLAIF / DPO training with AI-generated preferences
+
+% B. Lessons for STT
+% - What transfers: preference-based alignment, semantic metrics, AI feedback
+% - What does not: generative continuation vs. transcription, CTC alignment
+\pagebreak
+
+\section{Survey of RL/RLHF Frameworks Relevant to STT}
+% A. Taxonomy of RL/RLHF Frameworks
+% - Groups: LM-focused RLHF toolkits vs general RL libraries
+
+% B. High-Level Summaries
+% - VERL, AREAL, MILES, SMILE
+% - OpenRLHF, TRL, DeepSpeed-Chat, TRLX, RL4LMs
+% - Ray RLlib and related generic RL libraries
+
+% C. STT Integration Gap (Teaser)
+% - Lack of native audio/CTC environments, replay tailored to STT,
+%   and tight coupling to NeMo/ESPNet
+\label{sec:rl-frameworks}
+
+\subsection{Taxonomy of RL/RLHF Frameworks}
+
+From the perspective of speech-to-text self-adaptation, existing reinforcement learning frameworks can be broadly grouped into two categories: (i) language-model-focused RLHF toolkits designed for aligning large language models with human or AI preferences, and (ii) general-purpose RL libraries that target a wide range of control and decision-making problems.
+LM-focused frameworks, such as VERL, OpenRLHF, DeepSpeed-Chat, Hugging Face TRL, TRLX, and RL4LMs, provide end-to-end pipelines for supervised fine-tuning, reward modeling, and on-policy or preference-based optimisation of Transformer policies operating over token sequences.
+General RL libraries, exemplified by Ray RLlib and related toolkits, offer algorithm-agnostic infrastructure (environments, policies, replay buffers, distributed rollouts) that can, in principle, host speech recognition environments but do not natively encode ASR- or CTC-specific structure.
+
+Within the LM-focused group, frameworks differ in the granularity of abstraction they provide.
+Systems like VERL and OpenRLHF emphasise scalable, production-grade RLHF and RLVR (reinforcement learning from verifiable rewards), with rich support for parallel rollout engines, multi-GPU training backends, and an extensive menu of RL algorithms (PPO, GRPO, REINFORCE variants, DPO and related objectives).{[}file:23{]}
+In contrast, higher-level libraries such as TRL, TRLX, and RL4LMs wrap Hugging Face Transformers models with simplified APIs for SFT, reward modeling, and a smaller set of RLHF or preference-optimisation methods, trading off some systems flexibility for ease of use.
+General RL libraries like RLlib expose a wide collection of on-policy, off-policy, model-based, and multi-agent algorithms, together with environment and policy abstractions that are agnostic to the underlying domain, making them candidates for custom STT environments but with minimal speech-specific tooling out of the box.
+
+\subsection{High-Level Framework Summaries}
+
+\textbf{VERL, AReaL, MILES, SMILE.}
+VERL (Volcano Engine Reinforcement Learning) is a modular RLHF and RLVR framework that supports a wide spectrum of post-training algorithms, including PPO, GRPO, GSPO, ReMax, REINFORCE++, leave-one-out variants, and replay-augmented methods such as PF-PPO, along with standard supervised fine-tuning for the initial stage.
+It distinguishes between RLHF, where reward models trained from preference data provide scalar feedback, and RLVR, where verifiable rewards such as unit-test pass rates or symbolic checkers are used, and offers extensions (verl-tool, verl-agent) for multi-turn, tool-using agents interacting with external systems like code runners or search APIs.
+AReaL, MILES, and SMILE, while differing in focus, similarly explore scalable RL or RLHF for large models with an emphasis on high-throughput rollouts, asynchronous or mixed online–offline training regimes, and improved sample efficiency, positioning them as research-oriented frameworks rather than turnkey STT solutions.
+
+\textbf{OpenRLHF, TRL, DeepSpeed-Chat, TRLX, RL4LMs.}
+OpenRLHF is a production-ready RLHF/RLVR framework that tightly couples Ray for distributed orchestration, vLLM for efficient rollout generation, and DeepSpeed for memory-optimised training, enabling alignment runs for models exceeding 70B parameters.
+Its architecture decomposes into a Ray-based controller, vLLM rollout engines, DeepSpeed training backends, an agent execution layer abstracting token-in/token-out interactions, and CLI workflows that cover SFT, reward modeling, PPO-based RLHF, and offline methods such as DPO and KTO, with support for custom rewards and external environments.
+DeepSpeed-Chat provides a closely related stack focused on DeepSpeed-integrated RLHF training, while Hugging Face TRL, TRLX, and RL4LMs expose higher-level Python APIs for SFT, reward modeling, PPO- or GRPO-style RLHF, and direct preference optimisation on top of Hugging Face Transformers checkpoints, prioritising developer ergonomics over full-stack systems control.
+
+\textbf{Ray RLlib and generic RL libraries.}
+Ray RLlib is a general-purpose RL library built on the Ray distributed execution framework, offering more than twenty algorithms across on-policy (PPO, A2C/A3C, IMPALA), off-policy (DQN, Rainbow, SAC, TD3), model-based (DreamerV3, MuZero), multi-agent, and offline RL paradigms.
+Its architecture includes modular algorithm implementations, flexible environment and policy interfaces (Gymnasium, PettingZoo, custom vectorised environments), a distributed execution layer that scales rollouts and training across clusters, replay utilities for offline and off-policy learning, and callback APIs for curriculum learning and dynamic reward shaping.
+Although RLlib has been successfully applied to high-throughput environments such as Atari, MuJoCo, and multi-agent StarCraft, and supports GPU acceleration, mixed precision, and gradient compression, it does not provide built-in abstractions for ASR-specific constructs such as CTC decoding, beam search, or WER-based rewards; these must be implemented as custom environments and reward functions by the user.
+
+\subsection{STT Integration Gap (Teaser)}
+
+When viewed through the lens of speech-to-text self-adaptation, the surveyed RL and RLHF frameworks reveal a common integration gap.
+LM-focused RLHF toolkits assume discrete text-token action spaces and autoregressive decoding, with reward models trained on natural language preferences, but lack native support for audio inputs, CTC or RNN-T decoding, or speech-specific error metrics such as WER and CER as first-class reward signals.
+General RL libraries like RLlib offer the flexibility to define custom environments, but they provide no pre-packaged audio or ASR environments, no specialised replay-buffer schemes for long, variable-length utterances, and no ready-made connectors to established STT frameworks such as NeMo or ESPnet.
+
+As a result, applying these frameworks to STT today requires substantial glue code: wrapping NeMo or ESPnet models as RL policies, exposing log-probabilities and hypotheses to the RL loop, designing reward functions over WER or downstream task performance, and managing rollouts and replay in a way that respects the computational and latency constraints of speech workloads.
+These integration burdens, together with the absence of streaming-aware, CTC-conscious abstractions, highlight the need for STT-specific RL alignment layers that can bridge between mature ASR toolchains and the powerful but text-centric or domain-agnostic RL/RLHF infrastructure surveyed above.
+
+\section{Cross-Framework Mapping: STT vs. RL/RLHF Components}
+% A. Conceptual Mapping
+% - STT components: data loaders, decoders, trainers, metrics
+% - RL/RLHF components: environment, policy, reward, replay buffer, optimizer
+
+% B. Integration Pain Points
+% - Training loop ownership, observation/action mismatch
+% - Performance and deployment constraints for STT vs text LMs
+
+% (Optional) C. Mapping Table
+% - Framework-by-framework mapping of available/missing pieces
+
+\label{sec:cross-mapping}
+
+\subsection{Conceptual Mapping}
+
+To reason about how STT toolchains and RL/RLHF frameworks might interoperate, it is useful to view them through a shared set of abstractions.
+On the STT side, frameworks such as NeMo and ESPnet2 expose components including data loaders and manifests, acoustic and sequence models, training loops, and evaluation metrics.
+On the RL/RLHF side, frameworks such as VERL, OpenRLHF, TRL, TRLX, RL4LMs, and RLlib decompose the problem into environments, policies, reward functions, replay buffers, and optimizers or RL trainers.
+
+Conceptually, the STT data loader and manifest system correspond to the environment’s observation generator: they select audio segments and associated metadata (references, domains) that define initial states and contextual information for each trajectory.
+The ASR model (e.g., Conformer encoder plus CTC or attention decoder) plays the role of the policy, mapping acoustic features to token sequences, while beam search or CTC decoding correspond to the policy’s action-selection mechanism over sequences of discrete actions.
+Evaluation metrics such as per-utterance WER, CER, or semantic scores can be interpreted as reward functions over completed trajectories, possibly composed with latency or cost terms in production settings, and JSONL prediction logs in ESPnet2 already instantiate this mapping by recording hypotheses, references, log-probabilities, and WER for each utterance.
+
+From the RL/RLHF standpoint, STT training loops and schedulers approximate the role of the optimizer or RL trainer.
+NeMo’s PyTorch Lightning trainers and ESPnet2’s \texttt{Trainer} and \texttt{RLTrainer} classes drive gradient updates, blending supervised losses (CTC/attention) with optional policy-gradient terms when RL is enabled.
+Replay buffers and off-policy storage in RL frameworks correspond to potential extensions of STT data pipelines, where curated subsets of past audio–transcript pairs or logged trajectories would be mixed with new data to stabilise continual learning; some of this functionality can be emulated via custom data loaders in NeMo and the reward-logging pipeline in ESPnet2, but is not yet first-class.
+Finally, RL-specific components such as reference policies and value networks map naturally onto frozen STT checkpoints (for KL regularisation) and auxiliary heads on encoders (for critic estimates), but these are not currently standard in mainstream ASR recipes.
+
+\subsection{Integration Pain Points}
+
+Despite the apparent conceptual alignment, several structural mismatches complicate direct integration.
+One major issue is training-loop ownership: RLHF frameworks expect to orchestrate the full rollout–update cycle, while STT toolkits encapsulate training in monolithic scripts or trainers that assume purely supervised objectives.
+In NeMo, for example, loss computation and optimiser steps are baked into PyTorch Lightning modules and Hydra-driven scripts, so on-policy RL or asynchronous rollouts would require refactoring these trainers to decouple inference-only phases from gradient updates; in ESPnet2, \texttt{RLESPnetModel} partly addresses this by embedding RL logic inside a single \texttt{forward} call, but full PPO-style separation of rollout and learning still demands additional scaffolding.
+By contrast, RL libraries such as VERL, OpenRLHF, and RLlib assume central control over environment stepping and policy updates, making it non-trivial to plug in an STT toolkit that wants to manage its own optimisation schedule and checkpointing.
+
+A second pain point lies in observation and action mismatches.
+RLHF toolkits are predominantly text-centric: policies operate over prompt–token sequences, and environments supply text observations that fit neatly into LLM context windows, whereas STT pipelines consume raw waveforms or spectrograms and produce transcripts via CTC or encoder–decoder mechanisms.
+Bridging this gap requires wrapping ASR models as policies that expose log-probabilities over token sequences, treating complete utterance transcriptions as episodic trajectories, and defining rewards over WER, CER, or semantic quality—none of which are first-class citizen abstractions in existing RL frameworks.
+Moreover, streaming STT introduces partial observations and low-latency constraints that standard RLHF rollouts, which assume full prompts and responses, are not designed to handle.
+
+Finally, performance and deployment constraints differ markedly between STT and text LMs.
+RLHF systems for LLMs optimise throughput in tokens per second using engines like vLLM or SGLang, and can often tolerate higher latencies during training because rollouts operate on short text prompts.
+STT workloads, by contrast, process long and variable-length audio segments, often under real-time or near-real-time constraints, with heavy encoder computation dominating cost and latency; naive application of RLHF frameworks to speech would likely yield prohibitively slow rollouts and infeasible GPU budgets without speech-specific optimisations.
+Additionally, production STT services have strict availability and regression constraints, so integrating RL-driven updates into deployment pipelines requires careful orchestration of evaluation, rollback, and cost-aware scheduling that current RLHF stacks, designed primarily for offline training jobs, do not natively provide.
+
+\subsection{Illustrative Mapping Table}
+
+Table~\ref{tab:cross-mapping} provides a high-level, illustrative mapping between core STT and RL/RLHF components, highlighting where NeMo, ESPnet2, and generic RL frameworks already align and where additional glue or new abstractions are required.
+
+\begin{table}[t]
+\centering
+\caption{Conceptual mapping between STT and RL/RLHF components, and current support in NeMo, ESPnet2, and generic RL frameworks.}
+\begin{tabular}{lccc}
+\toprule
+Concept & STT Realisation & RL/RLHF Role & Current Support \\
+\midrule
+Data / Environment &
+Manifests, data loaders &
+Environment, sampler &
+NeMo/ESPnet native; RLlib env APIs \\
+Policy model &
+ASR encoder--decoder &
+RL policy $\pi_\theta$ &
+Both; RL side text-centric \\
+Rewards / metrics &
+WER, CER, semantic scores &
+Reward function $R(x, y)$ &
+ESPnet2 logs; RLHF reward models \\
+Trainer / optimiser &
+CE/CTC trainers, schedulers &
+RL trainer, PPO/DPO, etc. &
+Both; limited cross-wiring \\
+Replay / buffer &
+Custom loaders, logs (optional) &
+Replay buffer, trajectory store &
+RL side only; STT via custom code \\
+Reference / critic &
+Frozen checkpoints, extra heads &
+Ref. policy, value network &
+Ad hoc in STT; native in RLHF \\
+\bottomrule
+\end{tabular}
+\label{tab:cross-mapping}
+\end{table}
+
+
+\section{Experimental Comparison of STT Fine-Tuning Frameworks}
+% A. Experimental Design
+% - Baseline fine-tuning for NeMo, ESPNet (and others if applicable)
+% - PEFT variants, multi-domain and drift scenarios
+
+% B. Metrics and Evaluation
+% - Accuracy, robustness under domain shift, continual-learning metrics
+% - Efficiency: latency, GPU-hours, cost per 1\% WER improvement
+
+% C. Results and Discussion
+% - Summary of key trends; framework strengths/weaknesses from experiments
+% - Observations that feed directly into the gap analysis
+\pagebreak
+
+\section{Gap Analysis and Research Opportunities}
+% A. Gaps in STT Fine-Tuning Frameworks
+% - Missing online/on-policy adaptation interfaces
+% - Limited continual-learning and replay-buffer support
+% - Lack of standardized reward interfaces over STT metrics
+
+% B. Gaps in RL/RLHF Frameworks for STT
+% - Text-only assumptions, no CTC/ASR awareness
+% - No turnkey integration with NeMo/ESPNet
+
+% C. Design Requirements for Self-Adaptive STT
+% - Desired properties of a unified, self-learning STT framework
+% - Keep description abstract to avoid overlapping with the follow-up paper
+\label{sec:gaps}
+
+\subsection{Gaps in STT Fine-Tuning Frameworks}
+
+Although NeMo and ESPnet2 provide strong support for supervised ASR training and domain adaptation, they lack native interfaces for online or on-policy adaptation driven by runtime feedback.
+NeMo’s ASR trainers are built around epoch-based PyTorch Lightning loops that assume static datasets and fixed objectives; integrating on-policy RL requires overriding internal loss functions and restructuring training scripts to decouple inference-only rollouts from gradient updates, which is not supported out of the box.
+ESPnet2’s \texttt{RLESPnetModel} and \texttt{RLTrainer} demonstrate that REINFORCE-style updates can be embedded into the existing trainer, but more advanced algorithms like PPO still demand new trainers, value heads, and rollout buffers, indicating that online adaptation remains a niche extension rather than a first-class capability.
+
+Support for continual learning and replay buffers is similarly limited.
+NeMo’s manifest-based data loaders and dynamic bucketing are well-suited to static or periodically refreshed datasets, but experience replay requires custom data loaders, reward tracking per sample, and prioritised sampling—features that must be engineered separately by users.
+ESPnet2 recipes encode strong single-domain and multi-corpus training practices, but do not explicitly expose domain-aware replay protocols, backward-transfer metrics, or drift-aware sampling strategies needed for robust sequential adaptation under domain shift.
+As a result, researchers must construct ad hoc replay buffers and drift protocols on top of these frameworks, rather than relying on built-in continual-learning abstractions.
+
+Finally, existing STT toolkits do not offer standardised reward interfaces over speech-specific metrics.
+While both NeMo and ESPnet2 compute WER and CER in evaluation pipelines, these metrics are treated as diagnostic outputs rather than differentiable or pluggable reward signals that can be used in training objectives.
+ESPnet2’s RL scaffold introduces an \texttt{rl\_weight} parameter and a blended loss template for combining cross-entropy and policy-gradient terms, but reward functions (e.g., \(1 - \text{WER}\), semantic similarity) are still ad hoc Python code rather than part of a unified reward API spanning training and decoding.
+This lack of standard reward abstractions over WER, CER, diarization error rate, and domain-specific metrics makes it difficult to share or reproduce RL-style STT experiments, and hinders integration with external RL/RLHF engines.
+
+\subsection{Gaps in RL/RLHF Frameworks for STT}
+
+Conversely, RL and RLHF frameworks have been optimised primarily for text-based large language models and make assumptions that do not transfer cleanly to speech recognition.
+Full-stack systems such as VERL, OpenRLHF, DeepSpeed-Chat, slime/MILES, and research libraries like TRL, TRLX, and RL4LMs all assume discrete text-token action spaces, autoregressive decoding, and reward models trained on textual preferences, with no native support for audio inputs, CTC or RNN-T decoding, or WER/CER as first-class reward signals.
+Generic RL libraries such as Ray RLlib provide domain-agnostic environment and policy abstractions, but do not include built-in ASR environments, speech features, or streaming constraints, leaving all speech-specific logic to end users.
+
+There is also no turnkey integration between these RL/RLHF frameworks and mainstream STT toolkits like NeMo and ESPnet2.
+Although RL libraries allow custom environments, wrapping an ASR model as a policy requires implementing audio feature extraction, decoding, reward computation, and logging, as well as handling long variable-length trajectories and high inference cost.
+Similarly, while NeMo and ESPnet2 can, in principle, expose hooks for external RL controllers, there are no standard adapters, APIs, or examples demonstrating end-to-end pipelines where RLHF frameworks drive NeMo/ESPnet2 models in a closed loop.
+This integration gap significantly raises the engineering barrier to deploying RL-driven STT adaptation compared to text-based RLHF, where policy, reward, and rollout components are already tightly integrated.
+
+\subsection{Design Requirements for Self-Adaptive STT}
+
+The preceding gaps motivate a set of design requirements for a unified, self-learning STT framework that bridges ASR toolchains and RL/RLHF infrastructure.
+First, such a framework should provide speech-native environment abstractions that treat STT models as policies acting on audio streams, with well-defined observation (features, context), action (token sequences, partial hypotheses), and termination semantics for both offline and streaming scenarios.
+These abstractions should integrate cleanly with existing ASR toolkits, reusing their data loaders, models, and decoders while exposing them through RL-compatible interfaces rather than re-implementing the entire stack.
+
+Second, the framework should offer standardised reward interfaces over STT metrics and semantic measures.
+Reward functions should be able to combine WER, CER, diarization and verb error rates, domain-specific error rates, latency and cost penalties, and potentially downstream task performance into scalar signals usable by RL algorithms, with consistent APIs across training, validation, and decoding pipelines.[file:1][file:2]
+Support for both learned reward models (e.g., preference-based quality predictors) and verifiable rewards (e.g., ground-truth WER on curated subsets, or consistency checks) would enable flexible alignment objectives analogous to RLHF and RLVR in text domains.
+
+Third, a self-adaptive STT framework should incorporate continual-learning and replay mechanisms as first-class components.
+This includes replay buffers for audio–transcript trajectories, drift-aware sampling strategies, backward-transfer metrics, and scheduling policies that decide when to trigger adaptation based on performance degradation and cost constraints.[file:2][file:3]
+Rather than relying solely on periodic manual retraining, the system should support both batch and incremental updates, with pluggable controllers that can implement simple heuristics or full RL-based scheduling policies.
+
+Finally, the overall design should be modular and interoperable rather than monolithic.
+ASR models, reward sources, replay buffers, schedulers, and RL optimisers should be composable, allowing practitioners to reuse existing NeMo or ESPnet2 recipes, plug into RL/RLHF engines where appropriate, and deploy in a range of operational modes (offline experiments, shadow training, or live adaptation) without committing to a single algorithm or vendor.
+By keeping these design requirements abstract—focusing on interfaces, capabilities, and integration patterns rather than specific architectures—this survey sets the stage for future work to instantiate concrete self-adaptive STT systems that satisfy them.
+
+
+\section{Open Challenges and Future Directions}
+% A. Technical Challenges
+% - Sample efficiency and stability of RL/RLHF for STT
+% - Robustness to noisy or adversarial feedback
+% - Multi-objective optimization (accuracy, latency, cost, safety)
+
+% B. Future Research Directions
+% - Preference-based alignment for STT
+% - Agentic STT systems with autonomous data curation and scheduling
+% - Integration into production MLOps and monitoring pipelines
+
+\section{Conclusion}
+% - Concise recap of survey findings
+% - Reiterate that existing tools fall short for full self-adaptive STT
+% - Explicitly state that this motivates dedicated frameworks,
+%   to be addressed in subsequent work
+
+% *** ACKNOWLEDGMENT (OPTIONAL) ***
+\section*{Acknowledgment}
+% TODO: Acknowledge funding, collaborators, data providers, etc.
+
+% *** REFERENCES ***
+\bibliographystyle{IEEEtran}
+\bibliography{references} % Create references.bib and manage with BibTeX
+
+\end{document}
