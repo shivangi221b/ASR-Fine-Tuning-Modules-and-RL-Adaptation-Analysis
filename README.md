@@ -62,15 +62,15 @@ NeMo 2.x needs **Python 3.10+** (`python3.11 -m venv .venv`). Always install wit
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
 python -m pip install -U pip
-python -m pip install -r requirements-nemo-train.txt
+python -m pip install -r nemo/requirements-nemo-train.txt
 python nemo/gcp_scripts/nemo_afrispeech_training.py --smoke_test
 ```
 
 If `pip install` says numpy is installed but `import numpy` still fails, run `python -c "import sys; print(sys.executable)"` and confirm it ends with `.../.venv/bin/python`; otherwise use `./.venv/bin/python -m pip install ...`.
 
-If you see **`Dataset scripts are no longer supported, but found afrispeech-200.py`**, your `datasets` package is 3.x. Reinstall with: `python -m pip install "datasets>=2.14.0,<3.0.0"` (already pinned in `requirements-nemo-train.txt`).
+If you see **`Dataset scripts are no longer supported, but found afrispeech-200.py`**, your `datasets` package is 3.x. Reinstall with: `python -m pip install "datasets>=2.14.0,<3.0.0"` (already pinned in `nemo/requirements-nemo-train.txt`).
 
-If transcribe / dataloader fails with **`np.sctypes` removed in NumPy 2.0`**, NeMo's audio code is not NumPy-2-ready yet: `python -m pip install "numpy>=1.22,<2.0"` (pinned in `requirements-nemo-train.txt`).
+If transcribe / dataloader fails with **`np.sctypes` removed in NumPy 2.0`**, NeMo's audio code is not NumPy-2-ready yet: `python -m pip install "numpy>=1.22,<2.0"` (pinned in `nemo/requirements-nemo-train.txt`).
 
 Artifacts: `checkpoints/`, `manifests/`, `results/*_results.json`.
 

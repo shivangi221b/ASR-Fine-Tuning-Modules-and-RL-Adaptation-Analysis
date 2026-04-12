@@ -53,6 +53,7 @@ from data import (  # noqa: E402
     build_nemo_manifest,
     load_dataset_bundle,
     load_librispeech_eval,
+    prepare_afrispeech_clinical_manifests_streaming,
 )
 
 import lightning.pytorch as pl
@@ -60,17 +61,6 @@ from lightning.pytorch.callbacks import Callback
 
 from lightning.pytorch import LightningModule
 from nemo.collections.asr.models import EncDecCTCModelBPE
-
-
-def _require_datasets_script_support() -> None:
-    """HuggingFace `datasets` 3+ no longer runs hub dataset .py scripts (e.g. AfriSpeech)."""
-    parts = _datasets_lib.__version__.split(".")
-    major = int(parts[0]) if parts[0].isdigit() else 0
-    if major >= 3:
-        raise RuntimeError(
-            f"AfriSpeech-200 needs `datasets` < 3 (dataset scripts). You have {_datasets_lib.__version__}. "
-            'Run: python -m pip install "datasets>=2.14.0,<3.0.0"'
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -891,6 +881,16 @@ def _dataset_loader_kwargs() -> dict:
 
 
 def prepare_manifests() -> Dict[str, str]:
+    if CFG.DATASET == "afrispeech_clinical":
+        return prepare_afrispeech_clinical_manifests_streaming(
+            train_n=CFG.TRAIN_SAMPLES,
+            val_n=CFG.VAL_SAMPLES,
+            test_n=CFG.TEST_SAMPLES,
+            load_test=CFG.RUN_FINAL_TEST_EVAL,
+            dataset_name=CFG.DATASET,
+            audio_base_dir=_SHARED_AUDIO_DIR,
+            manifest_dir=_SHARED_MANIFEST_DIR,
+        )
     ds, text_field = load_dataset_bundle(CFG.DATASET, **_dataset_loader_kwargs())
     # Audio is written to data/audio/<dataset_name>/ so clips from different
     # datasets never share a directory and WAV filenames cannot collide.

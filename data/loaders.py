@@ -21,6 +21,20 @@ from datasets import Audio, Dataset, DatasetDict, load_dataset
 
 logger = logging.getLogger(__name__)
 
+
+def require_datasets_script_support() -> None:
+    """HuggingFace ``datasets`` 3+ no longer runs hub dataset ``.py`` scripts (e.g. AfriSpeech)."""
+    import datasets as hf_datasets
+
+    parts = hf_datasets.__version__.split(".")
+    major = int(parts[0]) if parts[0].isdigit() else 0
+    if major >= 3:
+        raise RuntimeError(
+            f"AfriSpeech-200 needs `datasets` < 3 (dataset scripts). You have {hf_datasets.__version__}. "
+            'Run: python -m pip install "datasets>=2.14.0,<3.0.0"'
+        )
+
+
 # ---------------------------------------------------------------------------
 # AfriSpeech-200 (clinical)
 # ---------------------------------------------------------------------------
@@ -71,6 +85,7 @@ def load_afrispeech_clinical(
     -------
     (DatasetDict, "transcript")
     """
+    require_datasets_script_support()
     name = _resolve_afrispeech_name()
     logger.info("Loading AfriSpeech-200 clinical from %s", name)
 
