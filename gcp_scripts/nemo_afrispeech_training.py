@@ -7,7 +7,7 @@ Two-stage training:
   - Stage 2: Reward-augmented fine-tuning on top of SFT (MWER / WWER / LLM rewards)
 
 Datasets:
-  - AfriSpeech-200 clinical (official train / validation / test splits)
+  - AfriSpeech-200 clinical (official train / validation / test splits; manifests built via one-pass streaming to limit RAM)
   - VoxPopuli English (random train subset + official validation)
   - LibriSpeech clean-100 (optional train; full validation for forgetting checks)
 
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
 import math
@@ -33,6 +34,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import librosa
 import numpy as np
 import soundfile as sf
 import torch
@@ -71,12 +73,48 @@ except ImportError:
     _HAS_GENAI = False
     genai = None  # type: ignore
 
+try:
+    import psutil
+
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+    psutil = None  # type: ignore
+
+
+def _mono_float32(arr: np.ndarray) -> np.ndarray:
+    x = np.asarray(arr, dtype=np.float32)
+    if x.ndim > 1:
+        x = np.mean(x, axis=-1)
+    return np.ascontiguousarray(x.reshape(-1), dtype=np.float32)
+
+
+def _resample_to_16k(arr: np.ndarray, sr: int) -> Tuple[np.ndarray, int]:
+    if sr == 16000:
+        return arr, 16000
+    y = librosa.resample(np.asarray(arr, dtype=np.float32), orig_sr=sr, target_sr=16000)
+    return y.astype(np.float32), 16000
+
+
 # ===========================================================================
 # CONFIGURATION
 # ===========================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def log_mem(tag: str) -> None:
+    """Log process RSS (requires psutil). Helps diagnose OOM kills during data prep."""
+    if not _HAS_PSUTIL or psutil is None:
+        logger.info("[mem] %s — RSS=n/a (pip install psutil for RSS)", tag)
+        return
+    rss = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    logger.info("[mem] %s — RSS=%.0f MiB", tag, rss)
+    if rss > 26 * 1024:
+        logger.warning(
+            "[mem] RSS>~26GiB — risk of OOM kill on ~30GiB VMs; use --skip_test_eval, --train_samples caps, or n1-highmem-8."
+        )
 
 
 @dataclass
@@ -186,6 +224,8 @@ class Config:
     SKIP_GCS: bool = False
     UPLOAD_GCS_URI: Optional[str] = None  # e.g. gs://adaptive-ai-487419-stt-results/run1
 
+    # Default False: full fine-tuning is the primary WER/domain baseline in this repo.
+    # NeMo "adapter" is LinearAdapter (not HuggingFace PEFT LoRA); APIs vary by NeMo version — enable with --use_lora to experiment.
     USE_LORA: bool = False
 
     RUN_ZERO_SHOT: bool = True
@@ -256,7 +296,12 @@ def _collect_clinical_from_stream(stream, max_n: Optional[int]) -> List[dict]:
 
 
 def load_afrispeech_clinical() -> Tuple[DatasetDict, str]:
-    """Official train / validation / test with clinical filter."""
+    """Official train / validation / test with clinical filter.
+
+    Note: materializes all splits in RAM (from_list + cast_column). For training,
+    ``prepare_manifests`` uses a streaming low-RAM path instead when dataset is
+    ``afrispeech_clinical``. Keep this for callers that need an in-memory DatasetDict.
+    """
     _require_datasets_script_support()
     name = _resolve_afrispeech_name()
     logger.info("Loading AfriSpeech-200 clinical (train/validation/test) from %s", name)
@@ -379,7 +424,123 @@ def build_nemo_manifest(dataset, split_name: str, audio_dir: str, text_field: st
             f.write(json.dumps(entry) + "\n")
             written += 1
     logger.info("  Manifest %s: %d rows (%d skipped)", manifest_path, written, skipped)
+    log_mem(f"build_nemo_manifest done split={split_name}")
     return manifest_path
+
+
+def _stream_afrispeech_clinical_split_to_manifest(
+    hf_name: str,
+    hf_split: str,
+    split_tag: str,
+    audio_dir: str,
+    max_clinical: Optional[int],
+) -> str:
+    """
+    One pass over a HuggingFace streaming split: filter clinical, resample to 16 kHz,
+    write WAV + JSONL manifest lines. Peak RAM stays ~O(1) w.r.t. split size (unlike
+    Dataset.from_list + cast_column for the whole split).
+    """
+    os.makedirs(audio_dir, exist_ok=True)
+    os.makedirs(CFG.MANIFEST_DIR, exist_ok=True)
+    manifest_path = os.path.join(CFG.MANIFEST_DIR, f"{split_tag}_manifest.json")
+    logger.info(
+        "  [low-mem] Streaming AfriSpeech clinical split=%s -> %s (cap=%s) …",
+        hf_split,
+        split_tag,
+        max_clinical,
+    )
+    log_mem(f"afrispeech stream start {split_tag}")
+    stream = load_dataset(hf_name, "all", split=hf_split, streaming=True)
+    written = 0
+    skipped = 0
+    hf_rows = 0
+    with open(manifest_path, "w", encoding="utf-8") as mf:
+        for sample in stream:
+            hf_rows += 1
+            if max_clinical is not None and written >= max_clinical:
+                logger.info(
+                    "  [low-mem] %s: reached clinical cap %s after scanning %d HF rows",
+                    split_tag,
+                    max_clinical,
+                    hf_rows,
+                )
+                break
+            if str(sample.get("domain", "")).lower() != "clinical":
+                continue
+            text = str(sample.get("transcript", "")).strip().lower()
+            if not text:
+                skipped += 1
+                continue
+            audio = sample.get("audio")
+            if not audio or "array" not in audio:
+                skipped += 1
+                continue
+            try:
+                arr = np.asarray(audio["array"])
+                sr = int(audio["sampling_rate"])
+            except (TypeError, ValueError, KeyError) as e:
+                logger.debug("skip row (audio decode): %s", e)
+                skipped += 1
+                continue
+            arr = _mono_float32(arr)
+            arr, sr = _resample_to_16k(arr, sr)
+            duration = float(len(arr)) / float(sr)
+            if duration < 0.5 or duration > 30.0:
+                skipped += 1
+                continue
+            wav_path = os.path.join(audio_dir, f"{split_tag}_{written:06d}.wav")
+            sf.write(wav_path, arr, 16000)
+            entry = {
+                "audio_filepath": os.path.abspath(wav_path),
+                "text": text,
+                "duration": round(duration, 3),
+            }
+            mf.write(json.dumps(entry) + "\n")
+            written += 1
+            if written % 500 == 0:
+                log_mem(f"afrispeech {split_tag} written={written}")
+                logger.info(
+                    "    [low-mem] %s: clinical_written=%d hf_rows_scanned=%d skipped=%d",
+                    split_tag,
+                    written,
+                    hf_rows,
+                    skipped,
+                )
+    logger.info(
+        "  [low-mem] Manifest %s: %d rows (%d skipped, %d HF rows scanned)",
+        manifest_path,
+        written,
+        skipped,
+        hf_rows,
+    )
+    log_mem(f"afrispeech stream end {split_tag}")
+    return manifest_path
+
+
+def prepare_afrispeech_manifests_low_mem() -> Dict[str, str]:
+    """Build train/val/(optional test) manifests without materializing full HF splits in RAM."""
+    _require_datasets_script_support()
+    name = _resolve_afrispeech_name()
+    audio_root = os.path.join(CFG.OUTPUT_DIR, "audio")
+    out: Dict[str, str] = {}
+    logger.info(
+        "Using low-RAM AfriSpeech path (stream -> WAV + manifest). "
+        "Training data identical to manifest-based NeMo path; peak RAM should stay far below Dataset.from_list."
+    )
+    out["train"] = _stream_afrispeech_clinical_split_to_manifest(
+        name, "train", "train", audio_root, CFG.TRAIN_SAMPLES
+    )
+    gc.collect()
+    out["val"] = _stream_afrispeech_clinical_split_to_manifest(
+        name, "validation", "val", audio_root, CFG.VAL_SAMPLES
+    )
+    gc.collect()
+    if CFG.RUN_FINAL_TEST_EVAL:
+        out["test"] = _stream_afrispeech_clinical_split_to_manifest(
+            name, "test", "test", audio_root, CFG.TEST_SAMPLES
+        )
+        gc.collect()
+    return out
 
 
 # ===========================================================================
@@ -938,6 +1099,7 @@ def upload_dir_to_gcs(local_dir: str, gcs_prefix: Optional[str]) -> None:
 
 def run_sft_stage(train_manifest: str, val_manifest: str, save_path: str, csv_path: Path) -> Tuple[EncDecCTCModelBPE, Dict[str, Any]]:
     logger.info("=" * 60 + "\nSTAGE 1: SFT\n" + "=" * 60)
+    log_mem("run_sft_stage entry")
     model = load_model_for_sft(CFG.NEMO_MODEL_NAME)
     data_cfg = build_data_config(train_manifest, val_manifest)
     model.setup_training_data(data_cfg.train_ds)
@@ -947,9 +1109,11 @@ def run_sft_stage(train_manifest: str, val_manifest: str, save_path: str, csv_pa
     trainer, optim = create_trainer(CFG.SFT_EPOCHS, warmup, CFG.LEARNING_RATE_SFT, csv_path)
     model.set_trainer(trainer)
     model.setup_optimization(optim)
+    logger.info("Starting trainer.fit (SFT, %d epochs) …", CFG.SFT_EPOCHS)
     t0 = time.time()
     trainer.fit(model)
     train_time = time.time() - t0
+    log_mem("run_sft_stage after trainer.fit")
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     model.save_to(save_path)
     upload_to_gcs(save_path, CFG.UPLOAD_GCS_URI)
@@ -957,6 +1121,7 @@ def run_sft_stage(train_manifest: str, val_manifest: str, save_path: str, csv_pa
     metrics["train_time_s"] = train_time
     for k in ("_refs", "_hyps"):
         metrics.pop(k, None)
+    log_mem("run_sft_stage exit")
     return model, metrics
 
 
@@ -968,6 +1133,7 @@ def run_rl_stage(
     csv_path: Path,
 ) -> Tuple[EncDecCTCModelBPE, Dict[str, Any]]:
     logger.info("=" * 60 + "\nSTAGE 2: RL (%s)\n" % CFG.REWARD_MODE + "=" * 60)
+    log_mem("run_rl_stage entry")
     model = load_model_for_rl(sft_checkpoint, CFG.REWARD_MODE, CFG.REWARD_WEIGHT)
     data_cfg = build_data_config(train_manifest, val_manifest)
     model.setup_training_data(data_cfg.train_ds)
@@ -977,9 +1143,11 @@ def run_rl_stage(
     trainer, optim = create_trainer(CFG.RL_EPOCHS, warmup, CFG.LEARNING_RATE_RL, csv_path)
     model.set_trainer(trainer)
     model.setup_optimization(optim)
+    logger.info("Starting trainer.fit (RL, %d epochs, reward_mode=%s) …", CFG.RL_EPOCHS, CFG.REWARD_MODE)
     t0 = time.time()
     trainer.fit(model)
     train_time = time.time() - t0
+    log_mem("run_rl_stage after trainer.fit")
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     model.save_to(save_path)
     upload_to_gcs(save_path, CFG.UPLOAD_GCS_URI)
@@ -991,6 +1159,7 @@ def run_rl_stage(
     metrics["reward_std"] = float(np.std(traj)) if traj else float("nan")
     for k in ("_refs", "_hyps"):
         metrics.pop(k, None)
+    log_mem("run_rl_stage exit")
     return model, metrics
 
 
@@ -1011,13 +1180,21 @@ def evaluate_zero_shot_bundle(val_manifest: str) -> Dict[str, Any]:
 
 
 def prepare_manifests() -> Dict[str, str]:
+    logger.info("prepare_manifests: dataset=%s", CFG.DATASET)
+    log_mem("prepare_manifests entry")
+    if CFG.DATASET == "afrispeech_clinical":
+        out = prepare_afrispeech_manifests_low_mem()
+        log_mem("prepare_manifests exit (afrispeech low-mem)")
+        return out
     ds, text_field = load_dataset_bundle(CFG.DATASET)
     audio_root = os.path.join(CFG.OUTPUT_DIR, "audio")
     out: Dict[str, str] = {}
+    logger.info("prepare_manifests: building manifests via HF Dataset (higher RAM than AfriSpeech stream path)")
     out["train"] = build_nemo_manifest(ds["train"], "train", audio_root, text_field)
     out["val"] = build_nemo_manifest(ds["validation"], "val", audio_root, text_field)
     if "test" in ds:
         out["test"] = build_nemo_manifest(ds["test"], "test", audio_root, text_field)
+    log_mem("prepare_manifests exit")
     return out
 
 
@@ -1050,6 +1227,13 @@ def save_results_json(payload: Dict[str, Any], path: Path) -> None:
 
 
 def run_full_pipeline() -> Dict[str, Any]:
+    logger.info(
+        "run_full_pipeline start: dataset=%s stage=both cuda=%s batch_size=%d",
+        CFG.DATASET,
+        torch.cuda.is_available(),
+        CFG.BATCH_SIZE,
+    )
+    log_mem("run_full_pipeline entry")
     os.makedirs(CFG.OUTPUT_DIR, exist_ok=True)
     os.makedirs(CFG.CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(CFG.RESULTS_DIR, exist_ok=True)
@@ -1059,6 +1243,13 @@ def run_full_pipeline() -> Dict[str, Any]:
     manifests = prepare_manifests()
     train_m, val_m = manifests["train"], manifests["val"]
     test_m = manifests.get("test")
+    logger.info(
+        "Manifests ready: train=%s val=%s test=%s",
+        train_m,
+        val_m,
+        test_m or "(none)",
+    )
+    log_mem("run_full_pipeline after prepare_manifests")
 
     run_id = f"{CFG.DATASET}_seed{CFG.SEED}_{int(time.time())}"
     cfg_dump = asdict(CFG)
@@ -1130,10 +1321,16 @@ def run_full_pipeline() -> Dict[str, Any]:
     upload_dir_to_gcs(str(Path(CFG.MANIFEST_DIR)), CFG.UPLOAD_GCS_URI)
 
     logger.info("Done. Key val WER: sft=%.2f rl=%.2f", sft_metrics["wer"], rl_metrics["wer"])
+    log_mem("run_full_pipeline exit")
     return results
 
 
 def run_sft_only() -> Dict[str, Any]:
+    logger.info("run_sft_only: dataset=%s", CFG.DATASET)
+    log_mem("run_sft_only entry")
+    os.makedirs(CFG.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(CFG.CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(CFG.RESULTS_DIR, exist_ok=True)
     manifests = prepare_manifests()
     run_id = f"{CFG.DATASET}_seed{CFG.SEED}_sft_{int(time.time())}"
     _, sft_metrics = run_sft_stage(
@@ -1143,10 +1340,16 @@ def run_sft_only() -> Dict[str, Any]:
         Path(CFG.RESULTS_DIR) / f"{run_id}_sft_epoch_metrics.csv",
     )
     save_results_json({"run_id": run_id, "sft": sft_metrics}, Path(CFG.RESULTS_DIR) / f"{run_id}_results.json")
+    log_mem("run_sft_only exit")
     return sft_metrics
 
 
 def run_rl_only(sft_checkpoint: str) -> Dict[str, Any]:
+    logger.info("run_rl_only: dataset=%s checkpoint=%s", CFG.DATASET, sft_checkpoint)
+    log_mem("run_rl_only entry")
+    os.makedirs(CFG.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(CFG.CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(CFG.RESULTS_DIR, exist_ok=True)
     manifests = prepare_manifests()
     run_id = f"{CFG.DATASET}_seed{CFG.SEED}_rl_{int(time.time())}"
     _, rl_metrics = run_rl_stage(
@@ -1157,6 +1360,7 @@ def run_rl_only(sft_checkpoint: str) -> Dict[str, Any]:
         Path(CFG.RESULTS_DIR) / f"{run_id}_rl_epoch_metrics.csv",
     )
     save_results_json({"run_id": run_id, "rl": rl_metrics}, Path(CFG.RESULTS_DIR) / f"{run_id}_results.json")
+    log_mem("run_rl_only exit")
     return rl_metrics
 
 
@@ -1179,7 +1383,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reward_weight", type=float, default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--upload_gcs", type=str, default=None, help="gs://bucket/prefix — checkpoints + results")
-    p.add_argument("--use_lora", action="store_true")
+    p.add_argument(
+        "--use_lora",
+        action="store_true",
+        help="Enable NeMo encoder LinearAdapter (experimental; not HF PEFT LoRA)",
+    )
     p.add_argument("--mock_llm", action="store_true", help="Force mock LLM reward")
     p.add_argument("--real_llm", action="store_true", help="Use Gemini for llm reward (needs GEMINI_API_KEY)")
     p.add_argument("--skip_zero_shot", action="store_true")
@@ -1229,6 +1437,19 @@ def main() -> None:
         CFG.BATCH_SIZE = args.batch_size
 
     set_seed(CFG.SEED)
+
+    logger.info(
+        "Effective config: stage=%s dataset=%s batch_size=%d train_samples=%s val_samples=%s "
+        "test_eval=%s upload_gcs=%s",
+        args.stage,
+        CFG.DATASET,
+        CFG.BATCH_SIZE,
+        CFG.TRAIN_SAMPLES,
+        CFG.VAL_SAMPLES,
+        CFG.RUN_FINAL_TEST_EVAL,
+        bool(CFG.UPLOAD_GCS_URI),
+    )
+    log_mem("main after CLI config")
 
     if not args.smoke_test:
         # Defaults for “full” AfriSpeech run

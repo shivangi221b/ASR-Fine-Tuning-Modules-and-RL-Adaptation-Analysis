@@ -292,7 +292,7 @@ python nemo_afrispeech_training.py --stage both --dataset voxpopuli \
 
 - **`n1-standard-*` + A100 “not compatible”:** switch to `a2-highgpu-1g` and drop `--accelerator` (A100 is tied to A2 shapes). Or keep N1 and use V100/T4.
 - **PyTorch “V100 / cuda capability 7.0 … minimum is 7.5”:** PyTorch 2.7 wheels target newer GPUs. Prefer **`nvidia-tesla-t4`** (or A100) on N1, or pin an older PyTorch + CUDA that still supports Volta.
-- **OOM:** reduce batch size in `Config` / add CLI override (future) or edit `BATCH_SIZE` in script.
+- **OOM / process `Killed`:** Linux OOM killer — confirm with `sudo dmesg -T | tail -30`. AfriSpeech uses a **streaming manifest** path (low RAM, same WAVs/NeMo training). Install **`psutil`** (`requirements-nemo-train.txt`) for `[mem] RSS=…` logs in the script. Mitigations: `--batch_size 4`, `--skip_test_eval`, `--train_samples` cap, or **`n1-highmem-8`**.
 - **Preemption:** rely on GCS uploads per stage; restart VM and continue from saved `.nemo`.
 - **AfriSpeech streaming slow:** first streaming pass filters clinical; manifests cache WAVs under `OUTPUT_DIR/audio`.
 - **`gsutil` not found:** install Google Cloud SDK or use `gcloud storage cp` (newer).
