@@ -149,11 +149,24 @@ pip install -r requirements-nemo-train.txt
 export GEMINI_API_KEY="..."
 
 nvidia-smi
-python -c "import torch; print('CUDA:', torch.cuda.is_available())"
+python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'avail', torch.cuda.is_available())"
 
 # Full runs on 16GB (T4/V100): use smaller batches (script flag or edit Config)
 #   python nemo_afrispeech_training.py --batch_size 8 --upload_gcs gs://.../run1
 ```
+
+**`RuntimeError: The NVIDIA driver on your system is too old (found version 12080)`**  
+That almost always means **PyTorch’s CUDA userland (often cu128 from `pip install torch`) is newer than what your VM driver supports**. The number `12080` is the driver’s reported CUDA compatibility, not a “bad GPU.”
+
+Fix on the VM (inside your venv):
+
+```bash
+pip uninstall -y torch torchvision torchaudio
+pip install -U pip setuptools wheel
+pip install -r requirements-nemo-train.txt
+```
+
+`requirements-nemo-train.txt` pins **`torch==2.5.1+cu121`** (and matching `torchvision` / `torchaudio`) via `--extra-index-url https://download.pytorch.org/whl/cu121`. If your `nvidia-smi` **CUDA Version** line is **≥ 12.4** and you prefer a newer wheel, you can instead reinstall with `--extra-index-url https://download.pytorch.org/whl/cu124` and matching `+cu124` versions from [PyTorch previous versions](https://pytorch.org/get-started/previous-versions/). Long-term, use a **PyTorch DL image** whose CUDA family matches the wheels you install (see `--image-family=...` above).
 
 ### Upload script (and optional full `gcp_scripts/`)
 

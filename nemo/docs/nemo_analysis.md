@@ -1,204 +1,176 @@
-# NVIDIA NeMo Analysis
+# NVIDIA NeMo: project script and methodology
 
-## **SECTION 1: Architecture Decomposition**
+This document describes **this repository’s** NeMo training entrypoint (`nemo/gcp_scripts/nemo_afrispeech_training.py`): what it does end-to-end, how **supervised fine-tuning (SFT)** is configured, and how the **second stage** combines CTC loss with **utterance-level rewards** (the script labels this stage “RL”; mathematically it is **reward-augmented / regularized fine-tuning**, not a policy-gradient RL algorithm).
 
-### **A. Document NeMo's ASR Training Pipeline Components**
-
-**Pipeline Structure:** NeMo supports FastConformer and Conformer architectures with both CTC and Transducer (RNN-T) decoders. FastConformer has 8x depthwise-separable convolutional downsampling, with configurations available in YAML files such as fast-conformer\_ctc\_bpe.yaml and fast-conformer\_transducer\_bpe.yaml [Medium](https://medium.com/@mimichen123/fine-tuning-your-speech-to-text-model-with-phrases-and-boost-gcp-e298a3ab1430).
-
-**Key Components:**
-
-1. **Data Loader**  
-   * Manifest-based system (JSON format with audio path \+ transcription)  
-   * Supports tarred datasets for large-scale training  
-   * Bucketing by audio length for efficient batching  
-   * Augmentation support: SpecAugment, time-stretching, pitch shifting  
-2. **Model Architecture (Encoder-Decoder)**  
-   * **Encoder:** FastConformer or Conformer (with optional longformer-style attention for sequences up to 70 minutes)  
-   * **Decoder:** CTC (non-autoregressive) or Transducer/RNN-T (autoregressive)  
-   * **Tokenizer:** Sub-word (BPE via SentencePiece) or character-level  
-3. **Loss Computation**  
-   * **CTC Loss:** Standard for CTC models  
-   * **Transducer/RNN-T Loss:** Joint network predicts token \+ duration  
-   * **Hybrid Loss:** Can combine both simultaneously  
-   * **InterCTC Loss:** Intermediate CTC losses from hidden layers (optional)  
-4. **Optimizer & Scheduler**  
-   * AdamW (default), SGD, LAMB support  
-   * Warmup strategies (linear, cosine annealing)  
-   * Learning rate schedules via Hydra config  
-5. **Trainer (PyTorch Lightning)**  
-   * Distributed training: DDP, FSDP (Fully Sharded Data Parallel)  
-   * Mixed precision: bf16, fp16, fp32  
-   * Gradient accumulation, checkpointing  
-   * Validation loop with WER computation  
-   * Checkpoint averaging available to improve final decoding accuracy, particularly useful for RNNT models (0.1-0.2% WER improvement) [ScienceDirect](https://www.sciencedirect.com/science/article/abs/pii/S088523082400024X)
-
-### **B. Map the speech\_to\_text\_finetune.py Workflow**
-
-The speech\_to\_text\_finetune.py script is a generic fine-tuning script that handles initialization from pre-trained models, vocabulary loading, and checkpoint management. It supports both init\_from\_nemo\_model (local .nemo checkpoint) and init\_from\_pretrained\_model (Hugging Face/NGC) with automatic vocabulary mismatch detection [Emergent Mind](https://www.emergentmind.com/topics/llm-based-automatic-speech-recognition-asr).
-
-**Workflow Steps:**
-
-1. **Model Loading:** Load pretrained checkpoint (automatic download from HuggingFace or NGC)  
-2. **Tokenizer Handling:** If new tokenizer vocab size differs, decoder is reinitialized  
-3. **Data Setup:** Load train/validation manifests  
-4. **Training Loop:** Iterate over epochs, compute loss, update weights  
-5. **Validation:** Evaluate WER on validation set every N steps  
-6. **Checkpointing:** Save best model \+ last N checkpoints  
-7. **Inference:** Transcribe test audio using trained model
-
-**Key Files:**
-
-* Config file: `speech_to_text_ctc_bpe.yaml` or `speech_to_text_rnnt_bpe.yaml`  
-* Training script: `examples/asr/speech_to_text_ctc_bpe.py` or `speech_to_text_rnnt_bpe.py`  
-* Evaluation: `examples/asr/speech_to_text_eval.py`
-
-### **C. Identify PEFT Integration Points**
-
-**NeMo 2.0 PEFT Architecture:**
-
-NeMo 2.0 formulates PEFT as a Model Transform mechanism—a PyTorch Lightning callback that mutates the model architecture at the start of fitting or validation. LoRA transforms linear layers into "LoRA linear" layers with parallel computation paths for adapter outputs, with substitution criteria based on module names, prefixes, or indices [Hugging Face](https://huggingface.co/nvidia/stt_en_conformer_transducer_xlarge).
-
-**Supported Methods:**
-
-* **LoRA:** Applies low-rank decomposition to linear layers. In NeMo, can target QKV projections, attention output layers, and MLP layers. QKV projections are fused, so LoRA learns a single low-rank projection for combined QKV [Readthedocs](https://speechbrain.readthedocs.io/en/latest/tutorials/advanced/pre-trained-models-and-fine-tuning-with-huggingface.html)  
-* **Adapters (Houlsby):** Insert bottleneck layers with configurable dimensions  
-* **IA3:** Rescaling-based adaptation for attention and feedforward modules
-
-**LoRA Integration for ASR (Custom Code Needed):**
-
-python
-
-```py
-from nemo.collections.asr.models import EncDecCTCModel
-from nemo.collections import llm  # NeMo 2.0 style
-
-# Load model
-asr_model = EncDecCTCModel.from_pretrained("nvidia/parakeet-ctc-1.1b")
-
-# Create LoRA config (NeMo 2.0 style)
-lora = llm.peft.LoRA(
-    target_modules=['linear_proj', 'linear_qkv'],  # Encoder modules
-    dim=32,  # Rank
-    alpha=64,  # Scaling
-    dropout=0.1
-)
-
-# Apply LoRA as callback during training
-# (requires modifying training script to pass lora to trainer)
-```
-
-**⚠️ Important Caveat:** PEFT support in NeMo is primarily documented for LLMs via NeMo 2.0 and Hugging Face AutoModel. ASR-specific PEFT integration is less mature and requires custom implementation [Readthedocs](https://speechbrain.readthedocs.io/en/v1.0.2/tutorials/nn/using-wav2vec-2.0-hubert-wavlm-and-whisper-from-huggingface-with-speechbrain.html).
+A short **NeMo ASR background** section at the end keeps high-level pointers to the generic stack (encoder–decoder, CTC, Lightning) for readers who are new to NeMo.
 
 ---
 
-## **SECTION 2: Fine-Tuning Strategy Catalog**
+## 1. Script purpose and high-level flow
 
-### **A. Supported Methods**
+**File:** `nemo/gcp_scripts/nemo_afrispeech_training.py`
 
-| Method | Params Trainable | Training Speed | Memory | Domain Adaptation |
-| ----- | ----- | ----- | ----- | ----- |
-| **Full Fine-Tuning** | 100% | Baseline | High | ✅ Excellent |
-| **LoRA** | 1-5% | \~same | \-50% | ✅ Good |
-| **Adapter Modules** | 2-10% | \~same | \-40% | ✅ Good |
-| **Layer-wise LR** | 100% | Baseline | High | ✅ Excellent |
-| **BitFit** | 0.1% | Slower | \-30% | ⚠️ Limited |
+**Goal:** Domain adaptation for English CTC ASR using a **two-stage** procedure:
 
-### **B. Parameter Efficiency Metrics**
+1. **Stage 1 — SFT:** Standard NeMo `EncDecCTCModelBPE` training with **CTC loss only** (no reward term).
+2. **Stage 2 — Reward-augmented training:** Same model class, loaded from the SFT `.nemo` checkpoint, with **`training_step` monkey-patched** so the scalar loss becomes **CTC loss plus a small term derived from batch rewards** (WER-based, weighted-WER-based, optional LLM score, or an average of those).
 
-For a typical 120M parameter FastConformer model:
+**Default backbone:** `stt_en_conformer_ctc_medium` (overridable via `Config.NEMO_MODEL_NAME`; smoke tests use `stt_en_conformer_ctc_small`).
 
-* **Full Fine-Tuning:** 120M trainable parameters  
-* **LoRA (rank=32, targets encoder):** \~1-2M trainable parameters (\~1.7% efficiency)  
-* **Adapter (hidden\_dim=256):** \~3-5M trainable parameters (\~3% efficiency)
+**Typical invocation:**
 
-### **C. Layer-wise Learning Rates (NeMo-specific)**
+- Full pipeline (default): `python nemo_afrispeech_training.py` (or `--stage both`)
+- SFT only: `--stage sft`
+- Second stage only: `--stage rl --sft_checkpoint /path/to/sft_model.nemo`
+- Quick sanity check: `--smoke_test`
 
-NeMo supports layer-wise learning rate adaptation via configuration. Common domain adaptation recipes include warmup strategies, multi-stage training with frozen encoder→decoder unfreezing, and dynamic learning rate adjustment [arXiv](https://arxiv.org/list/eess.AS/recent).
+**Artifacts:**
 
-**Example Strategy for Domain Adaptation:**
+- Checkpoints: `CFG.CHECKPOINT_DIR` (default `./checkpoints`) — `sft_model.nemo`, `rl_model.nemo`
+- Per-run metrics CSV: `CFG.RESULTS_DIR` (default `./results`) — SFT and RL epoch callback dumps
+- Aggregated JSON: `CFG.RESULTS_DIR / {run_id}_results.json`
+- Manifests and extracted audio live under the **repo** `data/manifests` and `data/audio` (paths are derived from the script location, not configurable in `Config`)
 
-yaml
-
-```
-model:
-  optim:
-    name: adamw
-    lr: 1.0e-4  # Base LR
-    # Layer-wise LR multipliers (custom implementation needed)
-  optim_sched:
-    warmup_steps: 2000
-    warmup_ratio: 0.1
-
-trainer:
-  max_epochs: 20
-  # Freeze encoder for first 5 epochs, then unfreeze
-```
+Optional **`gsutil`** upload of checkpoints, results JSON, and manifest directory when `UPLOAD_GCS_URI` / `--upload_gcs` is set (skipped in smoke test or if `SKIP_GCS`).
 
 ---
 
-## **SECTION 3: RL Compatibility Analysis**
+## 2. Configuration highlights (`Config`)
 
-### **A. Loss Computation Flexibility**
+| Area | Defaults (non–smoke-test) | Notes |
+|------|---------------------------|--------|
+| **Datasets** | `afrispeech_clinical` | Alternatives: `librispeech`, `voxpopuli` |
+| **Batch size** | 16 | CLI `--batch_size`; README suggests lowering on 16GB GPUs |
+| **SFT** | `LEARNING_RATE_SFT=1e-4`, `SFT_EPOCHS=5` | AdamW + CosineAnnealing with warmup |
+| **Stage 2** | `LEARNING_RATE_RL=1e-5` (10× lower than SFT), `RL_EPOCHS=2` | Comment in code: “1/10 SFT per paper plan” |
+| **Reward** | `REWARD_MODE="mwer"`, `REWARD_WEIGHT=0.05`, `REWARD_STEP_INTERVAL=4` | Reward computed every N **batches**; skipped batches reuse cached rewards or 0.5 |
+| **Long audio guard** | `MAX_ENCODER_LEN_FOR_REWARD=2000` | If max frame length in batch exceeds this, reward forward/decode is skipped; cached or neutral rewards used |
+| **LoRA** | `USE_LORA=False` | `--use_lora` tries NeMo `add_adapter` with a linear adapter config (version-dependent) |
+| **LLM reward** | `GEMINI_MODEL="gemini-1.5-flash"`, `USE_MOCK_LLM=True` | `--real_llm` sets live Gemini when `GEMINI_API_KEY` is set; otherwise MWER-based fallback |
+| **Eval / analysis flags** | Zero-shot val, LibriSpeech forgetting eval, final test eval, bootstrap iters | Toggle via `skip_*` CLI flags |
 
-**Current State:**
+Smoke test (`apply_smoke_test_overrides`) shrinks data caps, epochs, batch size, disables Libri forgetting eval by default, uses small model, skips GCS, reduces bootstrap iterations.
 
-* NeMo ASR uses standard CTC or RNN-T loss by default  
-* Models support InterCTC loss (auxiliary CTC losses from intermediate layers with configurable weights and layer positions) [Springer](https://link.springer.com/chapter/10.1007/978-3-031-53720-2_9)  
-* Custom loss injection requires modifying the model's `_compute_loss()` method
+---
 
-**Can You Replace with Reward-Based Loss?** ✅ **Yes, but requires custom code.**
+## 3. Data preparation and manifests
 
-Example approach (pseudo-code):
+The script does **not** assume pre-built NeMo manifests for AfriSpeech; it calls into the repo **`data`** package:
 
-python
+- **`afrispeech_clinical`:** `prepare_afrispeech_clinical_manifests_streaming(...)` → train/val/(optional) test JSONL paths under `data/manifests`, audio under `data/audio`.
+- **`librispeech` / `voxpopuli`:** `load_dataset_bundle` then `build_nemo_manifest` per split; audio under `data/audio/<dataset_name>/` to avoid filename collisions.
 
-```py
-class CustomASRModel(EncDecCTCModel):
-    def _compute_loss(self, outputs, targets, input_lengths, target_lengths):
-        # Standard CTC predictions
-        log_probs = outputs  # logits from encoder
-        
-        # Compute WER-based reward (MWER-style)
-        # 1. Sample multiple hypotheses via beam search
-        # 2. Compute WER for each hypothesis
-        # 3. Use WER as reward signal
-        # 4. Apply policy gradient update
-        
-        # For now, fallback to standard CTC
-        return super()._compute_loss(outputs, targets, input_lengths, target_lengths)
-```
+**NeMo dataloader config** (`build_data_config`): 16 kHz, `max_duration` 20 s, `min_duration` 0.5 s on train, `trim_silence=False`, bucketing handled by NeMo defaults on the config dict. Worker count is 0 in smoke test, else 4.
 
-### **B. Gradient Flow Assessment**
+---
 
-✅ **Gradients are fully accessible:**
+## 4. Stage 1 — Supervised fine-tuning (SFT)
 
-* NeMo uses PyTorch Lightning, so gradients flow normally through encoder and decoder  
-* Can intercept gradients via hooks (`.register_backward_hook()`)  
-* Supports gradient accumulation, clipping, checkpointing
+**Entry:** `run_sft_stage` → `load_model_for_sft` → `trainer.fit(model)`.
 
-### **C. Data Pipeline Flexibility**
+**Model loading:** `EncDecCTCModelBPE.from_pretrained(CFG.NEMO_MODEL_NAME)` (NGC/HF-style NeMo pretrained id).
 
-**Current State:**
+**Reward disabled for SFT:** `model.reward_weight = 0.0`; internal logging slots (`_step_logs`, `_reward_batch_idx`, `_cached_batch_reward`) initialized. No patch to `training_step` — **pure NeMo CTC training**.
 
-* Manifest-based fixed dataset loading  
-* Supports data augmentation (SpecAugment)  
-* Batch construction via dynamic bucketing
+**Optimization:** `model.setup_optimization(optim)` with OmegaConf dict:
 
-**For RL (Experience Replay, Prioritized Sampling):** ⚠️ **Partial support** — Requires custom data loader implementation
+- Optimizer: **AdamW**, `lr=LEARNING_RATE_SFT`, `weight_decay=1e-3`
+- Scheduler: **CosineAnnealing** with `warmup_steps` from `compute_warmup_steps` (~10% of total steps, capped)
 
-You'd need to:
+**Trainer (Lightning):** single device, GPU if available else CPU, `precision="16-mixed"` on CUDA else `32-true`, `max_epochs=SFT_EPOCHS`, **no Lightning checkpointing** (`enable_checkpointing=False`), no default logger; custom **`NemoTrainingLogger`** appends train/val callback metrics to CSV each validation epoch end.
 
-1. Create custom DataLoader that supports replay buffer  
-2. Modify manifest loading to mix current batch \+ replay samples  
-3. Track reward signals per sample  
-4. Implement prioritized sampling (higher weight for low-reward samples)
+**After SFT:** `model.save_to(save_path)` (`.nemo`), optional GCS upload, **`evaluate_manifest_bundle`** on the validation manifest (WER, CER, SER, domain-centric metrics — see §6).
 
-### **D. Checkpoint Compatibility**
+---
 
-✅ **Excellent:**
+## 5. Stage 2 — Reward-augmented training (“RL” in logs)
 
-* NeMo saves full checkpoints (.nemo format) with model weights \+ config  
-* Can load intermediate checkpoints for episode management  
-* Supports checkpoint averaging for RL policy snapshots
+**Important naming note:** The code and logs refer to this as **RL**, but the implementation is **not** REINFORCE / PPO / actor–critic. It keeps the **CTC objective** and adds a **scalar batch penalty** derived from **non-differentiable** decode-and-score rewards. Gradients flow only through **CTC**; rewards shape training **indirectly** by shifting the loss surface batch-to-batch (similar in spirit to auxiliary criteria used in some ASR “MWER training” discussions, but here the auxiliary term is **`reward_weight * (1 - mean reward)`**, not a full minimum-Bayes-risk gradient).
 
+**Entry:** `run_rl_stage` → `load_model_for_rl` → `trainer.fit(model)`.
+
+**Model loading:** `EncDecCTCModelBPE.restore_from(sft_checkpoint)`; sets `reward_mode`, `reward_weight`, clears logs, optionally attaches adapter.
+
+**Patch:** `original_training_step = model.training_step`, then `model.training_step = types.MethodType(patched_training_step, model)`.
+
+**Patched step logic (summary):**
+
+1. Call **original** `training_step` to get `ctc_loss` (dict or tensor).
+2. Extract batch tensors (supports multiple NeMo batch layouts: `.audio` / `.input_signal`, etc.).
+3. **Long-audio batch:** if `signal_len.max() > MAX_ENCODER_LEN_FOR_REWARD`, skip expensive decode; use **cached** prior batch rewards or **0.5** per utterance.
+4. **Step interval:** if `batch_idx % REWARD_STEP_INTERVAL != 0`, reuse **cached** rewards or 0.5.
+5. Otherwise, under **`torch.no_grad()`**:
+   - Forward: `log_probs, encoded_len, _ = self.forward(input_signal=signal, input_signal_length=signal_len)`
+   - Greedy-like CTC predictions: `self.wer.decoding.ctc_decoder_predictions_tensor(...)`
+   - References from token ids via `self.tokenizer.ids_to_text`
+6. **Reward vector** (per utterance, values in ~[0,1]):
+
+   - **`mwer`:** `1 - jiwer.wer(ref, hyp)` (clamped)
+   - **`wwer`:** `1 - weighted_wer_rate(...)` with domain term weights (clinical vs parliamentary set by `DATASET`)
+   - **`llm`:** Gemini 0–1 score from a short prompt, per pair; on failure / no key / mock: **MWER with small noise** or plain MWER
+   - **`all`:** average of MWER, WWER, LLM rewards
+
+7. **Loss:** `penalty = 1.0 - rewards.mean()`; **`total_loss = ctc_loss + reward_weight * penalty`**. Replace `result["loss"]` with `total_loss`.
+8. Append step diagnostics to `model._step_logs` (CTC loss, reward mean, penalty, flags for long audio / skipped reward).
+
+**Hyperparameters:** Lower LR (`1e-5`) and fewer epochs (`2`) than SFT to avoid destroying the CTC fit while nudging toward higher reward.
+
+**After stage 2:** Save `rl_model.nemo`, validate, attach **`reward_trajectory`** (mean reward per logged step) and summary stats to results.
+
+---
+
+## 6. Evaluation and analysis built into the pipeline
+
+**`evaluate_manifest_bundle`:** Transcribe manifest with `model.transcribe`, then:
+
+- **WER / CER / SER** (jiwer; SER = exact normalized sentence match rate)
+- **EWER** (`entity_wer_from_text`): WER computed on **domain vocabulary tokens** appearing in the reference
+- **Domain term precision / recall / F1** over domain lexicon occurrences
+
+**`run_full_pipeline` additionally:**
+
+- **`zero_shot_val`:** Fresh pretrained model on val manifest (if `RUN_ZERO_SHOT`)
+- **Catastrophic forgetting proxy:** LibriSpeech val manifest (`prepare_librispeech_eval_manifest`) after SFT and after RL (`RUN_LIBRISPEECH_FORGETTING`)
+- **Paired bootstrap p-value** (`paired_bootstrap_wer_pvalue`): two-sided approximate p-value for mean **utterance-level WER** difference between **SFT vs RL** hypotheses on the **same** references (`BOOTSTRAP_ITERS`, default 1000)
+- **Held-out test** (AfriSpeech): `test_sft` and `test_rl` if test manifest exists and `RUN_FINAL_TEST_EVAL`
+
+Results are merged into one JSON; large `_refs` / `_hyps` fields are stripped before save.
+
+---
+
+## 7. CLI quick reference
+
+| Flag | Effect |
+|------|--------|
+| `--smoke_test` | Tiny data, 1 epoch stages, small model, skip GCS / most forgetting |
+| `--stage {sft,rl,both}` | Run subset of pipeline |
+| `--sft_checkpoint` | Required for `--stage rl` |
+| `--dataset {afrispeech_clinical,librispeech,voxpopuli}` | Data domain |
+| `--train_samples`, `--val_samples`, `--test_samples` | Caps for AfriSpeech clinical |
+| `--voxpopuli_train_subset` | Train cap for VoxPopuli |
+| `--reward_mode`, `--reward_weight` | Override `REWARD_MODE` / `REWARD_WEIGHT` |
+| `--upload_gcs gs://...` | Upload artifacts |
+| `--use_lora` | Attempt encoder adapter attach |
+| `--mock_llm` / `--real_llm` | LLM reward behavior |
+| `--skip_zero_shot`, `--skip_librispeech_forgetting`, `--skip_test_eval` | Disable optional eval branches |
+| `--batch_size` | Override batch size (ignored for batch size if smoke test path—smoke sets its own) |
+
+---
+
+## 8. NeMo ASR background (generic reference)
+
+This is **not** specific to the script but helps situate the implementation.
+
+**Pipeline structure:** NeMo ASR commonly uses **Conformer / FastConformer** encoders with **CTC** or **RNN-T** heads; configs live in NeMo’s `examples/asr/conf`. This project uses **CTC BPE** (`EncDecCTCModelBPE`).
+
+**Typical stack:** Manifest JSONL (audio path + text) → NeMo collection dataloaders → Lightning `Trainer` → CTC loss + optional auxiliary losses (e.g. InterCTC in other recipes).
+
+**PEFT in NeMo:** NeMo 2.x emphasizes **model transforms / adapters** for many models; this script’s `maybe_attach_lora` path is a **pragmatic, version-tolerant** attempt to add a **linear adapter** on the encoder, not a guarantee across all NeMo versions.
+
+**True RL / MWER-style objectives in NeMo:** Replacing or augmenting loss with **full** risk-based objectives usually requires **custom model subclasses** or training loops; this script stays within **Lightning + patched `training_step`** and keeps **CTC** as the only direct gradient source from the decoder.
+
+---
+
+## 9. Relation to older versions of this doc
+
+Earlier revisions of `nemo_analysis.md` focused on **generic** NeMo components, `speech_to_text_finetune.py`, and hypothetical RL hooks. They have been **replaced / superseded** by §§1–7 above for **this repository’s** experiment driver; §8 retains a condensed generic reference where it still helps.
