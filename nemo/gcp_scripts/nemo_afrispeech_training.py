@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -36,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from jiwer import cer as compute_cer_jiwer
 from jiwer import wer as compute_wer_jiwer
 from omegaconf import DictConfig, OmegaConf
@@ -43,8 +45,23 @@ from omegaconf import DictConfig, OmegaConf
 # ---------------------------------------------------------------------------
 # Repo root and shared data paths
 # ---------------------------------------------------------------------------
-# parents[0] = gcp_scripts/, parents[1] = nemo/, parents[2] = repo root
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+def _detect_repo_root(start: Path) -> Path:
+    """
+    Find the repo root robustly.
+
+    This script is usually located at nemo/gcp_scripts/, but on some VMs it may
+    be copied to the repo root. We search upward for a directory that contains
+    the repo's `data/` folder.
+    """
+    p = start.resolve()
+    for cand in [p] + list(p.parents)[:8]:
+        if (cand / "data").is_dir():
+            return cand
+    # Fallback to previous assumption (keeps behavior stable if `data/` is absent).
+    return p.parents[2] if len(p.parents) >= 3 else p.parent
+
+
+_REPO_ROOT = _detect_repo_root(Path(__file__).parent)
 _SHARED_MANIFEST_DIR = str(_REPO_ROOT / "data" / "manifests")
 _SHARED_AUDIO_DIR = str(_REPO_ROOT / "data" / "audio")
 
@@ -58,6 +75,7 @@ from data import (  # noqa: E402
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from lightning.pytorch import LightningModule
 from nemo.collections.asr.models import EncDecCTCModelBPE
@@ -110,7 +128,12 @@ class Config:
     REWARD_MODE: str = "mwer"  # mwer | wwer | llm | all
     REWARD_WEIGHT: float = 0.05
     REWARD_STEP_INTERVAL: int = 4  # inject reward every N optimizer steps
-    MAX_ENCODER_LEN_FOR_REWARD: int = 2000  # long-audio guard (frames)
+    # Reward compute is expensive because it does forward+decode+string scoring.
+    # Guard it for long utterances. NOTE: batch signal lengths are typically in
+    # *audio samples*, not encoder frames, so we guard on seconds (sample-based)
+    # to avoid accidentally skipping reward on every batch.
+    MAX_AUDIO_SECONDS_FOR_REWARD: float = 25.0
+    SAMPLE_RATE: int = 16000
 
     OUTPUT_DIR: str = "./nemo-afrispeech-output"  # training artifacts (checkpoints, results)
     CHECKPOINT_DIR: str = "./checkpoints"
@@ -196,6 +219,24 @@ class Config:
     RUN_LIBRISPEECH_FORGETTING: bool = True
     RUN_FINAL_TEST_EVAL: bool = True
     BOOTSTRAP_ITERS: int = 1000
+    DEBUG_REWARD: bool = False
+    DEBUG_LOG_EVERY_N_STEPS: int = 200
+    DEBUG_SAMPLE_DUMP: bool = False
+    DEBUG_SAMPLE_EVERY_N_STEPS: int = 200
+    DEBUG_SAMPLE_COUNT: int = 10
+    EMPTY_HYP_WARN_FRAC: float = 0.5
+    NORMALIZE_TEXT: bool = False
+    TOKENIZER_UNK_GUARD: bool = True
+    TOKENIZER_UNK_WARN_FRAC: float = 0.2
+    # Default to fp32 for stability (esp. CTC); override with --force_fp32 false not supported,
+    # but you can implement an --amp flag later if you want 16-mixed throughput.
+    FORCE_FP32: bool = True
+    GRAD_CLIP_VAL: float = 1.0  # enable by default (helps CTC stability)
+
+    # Stage-2 objective: make reward actually affect gradients
+    # - "reweight_ctc": compute per-sample CTC loss and reweight by (1 + w*(1-reward))
+    # - "add_penalty": old behavior (adds constant penalty; does not change gradients)
+    RL_OBJECTIVE: str = "reweight_ctc"
 
 
 CFG = Config()
@@ -231,6 +272,299 @@ def apply_smoke_test_overrides() -> None:
     CFG.RUN_LIBRISPEECH_FORGETTING = False
     CFG.BOOTSTRAP_ITERS = 100
     CFG.RUN_FINAL_TEST_EVAL = True
+    # In practice, AfriSpeech clinical utterances can exceed 8s, and the reward
+    # debug path would be skipped entirely. Use a higher threshold for smoke tests
+    # so we actually exercise the reward compute path.
+    CFG.MAX_AUDIO_SECONDS_FOR_REWARD = 30.0
+    CFG.DEBUG_REWARD = True
+    CFG.DEBUG_LOG_EVERY_N_STEPS = 5
+    CFG.DEBUG_SAMPLE_DUMP = True
+    CFG.DEBUG_SAMPLE_EVERY_N_STEPS = 5
+    CFG.DEBUG_SAMPLE_COUNT = 10
+    CFG.EMPTY_HYP_WARN_FRAC = 0.2
+    CFG.NORMALIZE_TEXT = True
+    CFG.TOKENIZER_UNK_GUARD = True
+    CFG.TOKENIZER_UNK_WARN_FRAC = 0.1
+    # Smoke tests are for debugging logic, not peak throughput.
+    # AMP can introduce NaNs quickly on tiny datasets; force fp32 here.
+    CFG.FORCE_FP32 = True
+    CFG.GRAD_CLIP_VAL = 1.0
+    CFG.RL_OBJECTIVE = "reweight_ctc"
+
+
+# ===========================================================================
+# DEBUG SAMPLE DUMPS
+# ===========================================================================
+
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9\s']")
+
+
+def normalize_text_for_ctc(s: str) -> str:
+    """
+    Conservative text normalization for CTC+BPE models.
+
+    Goal: reduce tokenizer UNK pressure from punctuation/odd glyphs in AfriSpeech
+    transcripts during small-sample debugging.
+    """
+    s = s.lower().strip()
+    s = s.replace("\u2047", " ")  # NeMo logs show '⁇' glyph; treat as junk if present
+    s = _NON_ALNUM_RE.sub(" ", s)
+    return " ".join(s.split())
+
+
+def maybe_write_normalized_manifest(src_manifest: str, dst_manifest: str) -> str:
+    if not CFG.NORMALIZE_TEXT:
+        return src_manifest
+    Path(dst_manifest).parent.mkdir(parents=True, exist_ok=True)
+    n_in = 0
+    n_out = 0
+    with open(src_manifest, "r", encoding="utf-8") as fin, open(dst_manifest, "w", encoding="utf-8") as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            n_in += 1
+            txt = str(e.get("text", ""))
+            e["text"] = normalize_text_for_ctc(txt)
+            fout.write(json.dumps(e, ensure_ascii=False) + "\n")
+            n_out += 1
+    logger.info("Wrote normalized manifest: %s (rows=%d -> %d)", dst_manifest, n_in, n_out)
+    return dst_manifest
+
+
+def tokenizer_unk_stats(manifest_path: str, tokenizer: Any, sample_n: int = 200, seed: int = 0) -> Dict[str, Any]:
+    """
+    Approximate how often target text maps to tokenizer UNK.
+    High UNK pressure can cause the model to learn to emit only UNK ('⁇').
+    """
+    rows = load_manifest_examples(manifest_path, n=sample_n, seed=seed)
+    if not rows:
+        return {"n": 0}
+    # Try to locate unk id
+    unk_id = None
+    for attr in ("unk_id", "unk"):
+        if hasattr(tokenizer, attr):
+            try:
+                unk_id = int(getattr(tokenizer, attr))
+                break
+            except Exception:
+                pass
+    # NeMo SentencePieceTokenizer exposes `tokenizer.unk_id` via inner model sometimes
+    if unk_id is None and hasattr(tokenizer, "tokenizer") and hasattr(tokenizer.tokenizer, "unk_id"):
+        try:
+            unk_id = int(tokenizer.tokenizer.unk_id())
+        except Exception:
+            unk_id = None
+
+    unk_fracs: List[float] = []
+    lens: List[int] = []
+    for r in rows:
+        t = str(r.get("text", ""))
+        try:
+            ids = tokenizer.text_to_ids(t)
+        except Exception:
+            continue
+        ids = list(ids) if isinstance(ids, (list, tuple)) else list(getattr(ids, "tolist", lambda: [])())
+        if not ids:
+            continue
+        lens.append(len(ids))
+        if unk_id is None:
+            continue
+        unk_fracs.append(sum(1 for i in ids if int(i) == unk_id) / len(ids))
+    out: Dict[str, Any] = {
+        "n": len(lens),
+        "mean_len_ids": float(np.mean(lens)) if lens else float("nan"),
+        "unk_id": unk_id,
+    }
+    if unk_fracs:
+        out["mean_unk_frac"] = float(np.mean(unk_fracs))
+        out["p95_unk_frac"] = float(np.percentile(np.array(unk_fracs), 95))
+    return out
+
+
+def _safe_float(x: Any) -> Optional[float]:
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+def _safe_int(x: Any) -> Optional[int]:
+    try:
+        return int(x)
+    except Exception:
+        return None
+
+
+def load_manifest_examples(manifest_path: str, n: int, seed: int) -> List[Dict[str, str]]:
+    """Load N (path,text) examples from a NeMo manifest JSONL."""
+    rows: List[Dict[str, str]] = []
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            p = str(e.get("audio_filepath", "")).strip()
+            t = str(e.get("text", "")).strip()
+            if p:
+                rows.append({"audio_filepath": p, "text": t})
+    if not rows:
+        return []
+    rng = random.Random(seed)
+    rng.shuffle(rows)
+    return rows[: max(1, n)]
+
+
+def append_jsonl(path: Path, records: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def summarize_empty_hyps(hyps: Sequence[str]) -> Tuple[float, float]:
+    """Return (empty_fraction, mean_len_chars)."""
+    if not hyps:
+        return (1.0, 0.0)
+    empty = sum(1 for h in hyps if not str(h).strip())
+    mean_len = float(np.mean([len(str(h).strip()) for h in hyps])) if hyps else 0.0
+    return (empty / max(1, len(hyps)), mean_len)
+
+
+def summarize_degenerate_hyps(hyps: Sequence[str]) -> Tuple[float, float]:
+    """
+    Return (degenerate_fraction, mean_len_chars).
+
+    Treat hypotheses that are empty OR effectively only the SentencePiece/NeMo
+    unknown token glyph ('⁇') as degenerate. This is the failure mode we saw in
+    debug dumps (hypothesis_text == ' ⁇ ' repeated).
+    """
+    if not hyps:
+        return (1.0, 0.0)
+    cleaned = [str(h).strip() for h in hyps]
+    deg = 0
+    for s in cleaned:
+        if not s:
+            deg += 1
+            continue
+        # collapse whitespace and check if only unknown glyph(s)
+        ss = " ".join(s.split())
+        if ss.replace("⁇", "").strip() == "":
+            deg += 1
+    mean_len = float(np.mean([len(s) for s in cleaned])) if cleaned else 0.0
+    return (deg / max(1, len(cleaned)), mean_len)
+
+
+class SampleTranscriptionDumper(Callback):
+    """Periodically transcribe a fixed small set of files and dump ref/hyp pairs."""
+
+    def __init__(
+        self,
+        run_dir: Path,
+        stage: str,
+        val_manifest: str,
+        dump_every_n_steps: int,
+        n_examples: int,
+        seed: int,
+    ) -> None:
+        super().__init__()
+        self.run_dir = run_dir
+        self.stage = stage
+        self.dump_every_n_steps = max(1, int(dump_every_n_steps))
+        self.examples = load_manifest_examples(val_manifest, n=n_examples, seed=seed)
+        self.path = self.run_dir / "debug" / f"debug_samples_{stage}.jsonl"
+
+    def _dump(self, trainer: pl.Trainer, pl_module: LightningModule, reason: str) -> None:
+        if not self.examples:
+            return
+        model = pl_module  # NeMo model is also a LightningModule
+        paths = [e["audio_filepath"] for e in self.examples]
+        refs = [e.get("text", "") for e in self.examples]
+        try:
+            # Ensure deterministic eval-time behavior even when called mid-training.
+            was_training = bool(getattr(model, "training", False))
+            model.eval()
+            with torch.no_grad():
+                hyps_raw = model.transcribe(paths, batch_size=min(CFG.BATCH_SIZE, len(paths)))  # type: ignore[attr-defined]
+            if was_training:
+                model.train()
+        except Exception as e:
+            append_jsonl(
+                self.path,
+                [
+                    {
+                        "ts": time.time(),
+                        "stage": self.stage,
+                        "reason": reason,
+                        "epoch": int(getattr(trainer, "current_epoch", -1)),
+                        "global_step": int(getattr(trainer, "global_step", -1)),
+                        "error": f"{type(e).__name__}: {e}",
+                    }
+                ],
+            )
+            return
+
+        hyps: List[str] = []
+        for x in hyps_raw:
+            if isinstance(x, str):
+                hyps.append(x)
+            elif hasattr(x, "text"):
+                hyps.append(str(x.text))
+            else:
+                hyps.append(str(x))
+
+        empty_frac, _ = summarize_empty_hyps(hyps)
+        deg_frac, mean_len = summarize_degenerate_hyps(hyps)
+        header = {
+            "ts": time.time(),
+            "stage": self.stage,
+            "reason": reason,
+            "epoch": int(getattr(trainer, "current_epoch", -1)),
+            "global_step": int(getattr(trainer, "global_step", -1)),
+            "reward_mode": getattr(model, "reward_mode", None),
+            "reward_weight": _safe_float(getattr(model, "reward_weight", None)),
+            "empty_hyp_frac": empty_frac,
+            "degenerate_hyp_frac": deg_frac,
+            "mean_hyp_len_chars": mean_len,
+        }
+        records: List[Dict[str, Any]] = [header]
+        for p, r, h in zip(paths, refs, hyps):
+            records.append(
+                {
+                    "stage": self.stage,
+                    "audio_filepath": p,
+                    "reference_text": r,
+                    "hypothesis_text": h,
+                }
+            )
+        append_jsonl(self.path, records)
+
+        if deg_frac >= float(CFG.EMPTY_HYP_WARN_FRAC):
+            logger.warning(
+                "[debug-samples] High degenerate hypothesis rate: %.1f%% (stage=%s, step=%s). Wrote %s",
+                100.0 * deg_frac,
+                self.stage,
+                int(getattr(trainer, "global_step", -1)),
+                str(self.path),
+            )
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: LightningModule) -> None:
+        if CFG.DEBUG_SAMPLE_DUMP:
+            self._dump(trainer, pl_module, reason="val_epoch_end")
+
+    def on_train_batch_end(
+        self, trainer: pl.Trainer, pl_module: LightningModule, outputs: Any, batch: Any, batch_idx: int
+    ) -> None:
+        if not CFG.DEBUG_SAMPLE_DUMP:
+            return
+        step = int(getattr(trainer, "global_step", 0))
+        if step > 0 and (step % self.dump_every_n_steps == 0):
+            self._dump(trainer, pl_module, reason=f"train_step_{step}")
 
 
 # ===========================================================================
@@ -424,7 +758,14 @@ def transcribe_manifest(model: EncDecCTCModelBPE, manifest_path: str) -> Tuple[L
             e = json.loads(line)
             refs.append(e["text"])
             paths.append(e["audio_filepath"])
-    hyps_raw = model.transcribe(paths, batch_size=CFG.BATCH_SIZE)
+    # Ensure evaluation transcribe runs in eval/no_grad even if caller left the
+    # model in train mode after fitting.
+    was_training = bool(getattr(model, "training", False))
+    model.eval()
+    with torch.no_grad():
+        hyps_raw = model.transcribe(paths, batch_size=CFG.BATCH_SIZE)
+    if was_training:
+        model.train()
     hyps: List[str] = []
     for x in hyps_raw:
         if isinstance(x, str):
@@ -531,35 +872,50 @@ class NemoTrainingLogger(Callback):
         self.csv_path = csv_path
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self.rows: List[Dict[str, Any]] = []
+        self._fieldnames: List[str] = []
         if self.csv_path.exists():
             self.csv_path.unlink()
 
-    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: LightningModule) -> None:
-        metrics = {}
+    def _coerce_metrics(self, trainer: pl.Trainer) -> Dict[str, Any]:
+        metrics: Dict[str, Any] = {}
         for k, v in trainer.callback_metrics.items():
             try:
                 metrics[k] = float(v.item()) if hasattr(v, "item") else float(v)
             except (TypeError, ValueError):
                 metrics[k] = str(v)
+        return metrics
+
+    def _ensure_header_and_write(self) -> None:
+        # Callback metrics keys can vary over time; keep CSV parseable by
+        # rewriting the entire file when new columns appear.
+        fieldnames = sorted({k for r in self.rows for k in r.keys()})
+        if fieldnames != self._fieldnames:
+            self._fieldnames = fieldnames
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=self._fieldnames)
+                w.writeheader()
+                for r in self.rows:
+                    w.writerow(r)
+            return
+
+        # Fast path: append last row.
+        with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=self._fieldnames)
+            w.writerow(self.rows[-1])
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: LightningModule) -> None:
+        metrics = self._coerce_metrics(trainer)
         row = {"epoch": int(trainer.current_epoch), "stage": "train_end"}
         row.update(metrics)
         self.rows.append(row)
+        self._ensure_header_and_write()
 
     def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: LightningModule) -> None:
-        metrics = {}
-        for k, v in trainer.callback_metrics.items():
-            try:
-                metrics[k] = float(v.item()) if hasattr(v, "item") else float(v)
-            except (TypeError, ValueError):
-                metrics[k] = str(v)
+        metrics = self._coerce_metrics(trainer)
         row = {"epoch": int(trainer.current_epoch), "stage": "val_end"}
         row.update(metrics)
         self.rows.append(row)
-        with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=sorted({k for r in self.rows for k in r.keys()}))
-            if f.tell() == 0:
-                w.writeheader()
-            w.writerow(row)
+        self._ensure_header_and_write()
 
 
 # ===========================================================================
@@ -600,6 +956,13 @@ def load_model_for_sft(model_name: str) -> EncDecCTCModelBPE:
     model._step_logs = []
     model._reward_batch_idx = 0
     model._cached_batch_reward: Optional[torch.Tensor] = None
+    # For tiny smoke tests, SpecAugment can sometimes destabilize/obscure debugging.
+    # Disable it to make “blank hypothesis collapse” easier to diagnose.
+    if CFG.SMOKE_TEST and hasattr(model, "spec_augmentation"):
+        try:
+            model.spec_augmentation = None
+        except Exception:
+            pass
     maybe_attach_lora(model)
     return model
 
@@ -612,16 +975,19 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
     model._step_logs = []
     model._reward_batch_idx = 0
     model._cached_batch_reward = None
+    if CFG.SMOKE_TEST and hasattr(model, "spec_augmentation"):
+        try:
+            model.spec_augmentation = None
+        except Exception:
+            pass
     maybe_attach_lora(model)
 
     original_training_step = model.training_step
 
     def patched_training_step(self, batch, batch_idx):
-        result = original_training_step(batch, batch_idx)
+        # If reward is disabled, fall back entirely.
         if self.reward_weight == 0.0:
-            return result
-
-        ctc_loss = result["loss"] if isinstance(result, dict) else result
+            return original_training_step(batch, batch_idx)
 
         if hasattr(batch, "audio"):
             signal, signal_len = batch.audio, batch.audio_lens
@@ -633,9 +999,24 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
             signal, signal_len, transcript, transcript_len = batch[:4]
 
         batch_sz = int(transcript.size(0))
-        long_audio = bool((signal_len.max().item() > CFG.MAX_ENCODER_LEN_FOR_REWARD))
+        # In NeMo batches, signal_len is usually in audio samples (not frames).
+        # Guard based on duration seconds to avoid skipping reward always.
+        max_samp = float(signal_len.max().item())
+        max_sec = max_samp / float(CFG.SAMPLE_RATE)
+        long_audio = bool(max_sec > float(CFG.MAX_AUDIO_SECONDS_FOR_REWARD))
 
         compute_now = (batch_idx % CFG.REWARD_STEP_INTERVAL == 0) and not long_audio
+        if CFG.DEBUG_REWARD and (batch_idx < 5 or batch_idx % max(1, CFG.DEBUG_LOG_EVERY_N_STEPS) == 0):
+            logger.info(
+                "[reward-debug] step=%d bs=%d max_len_samples=%.0f max_len_sec=%.2f compute_now=%s long_audio=%s cached=%s",
+                int(batch_idx),
+                batch_sz,
+                max_samp,
+                max_sec,
+                bool(compute_now),
+                bool(long_audio),
+                self._cached_batch_reward is not None,
+            )
         if long_audio:
             if self._cached_batch_reward is not None:
                 rewards = self._cached_batch_reward.to(ctc_loss.device)
@@ -643,9 +1024,9 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
                 rewards = torch.ones(batch_sz, device=ctc_loss.device, dtype=torch.float32) * 0.5
         elif not compute_now:
             if self._cached_batch_reward is not None:
-                rewards = self._cached_batch_reward.to(ctc_loss.device)
+                rewards = self._cached_batch_reward
             else:
-                rewards = torch.ones(batch_sz, device=ctc_loss.device, dtype=torch.float32) * 0.5
+                rewards = torch.ones(batch_sz, dtype=torch.float32) * 0.5
         else:
             with torch.no_grad():
                 log_probs, encoded_len, _ = self.forward(input_signal=signal, input_signal_length=signal_len)
@@ -662,6 +1043,18 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
                     tl = transcript_len[i].item()
                     ids = transcript[i, :tl].tolist()
                     refs.append(self.tokenizer.ids_to_text(ids))
+                if CFG.DEBUG_REWARD and (batch_idx < 5 or batch_idx % max(1, CFG.DEBUG_LOG_EVERY_N_STEPS) == 0):
+                    empty_h = sum(1 for x in hyps if not str(x).strip())
+                    empty_r = sum(1 for x in refs if not str(x).strip())
+                    logger.info(
+                        "[reward-debug] step=%d encoded_len_max=%d empty_hyps=%d/%d empty_refs=%d/%d",
+                        int(batch_idx),
+                        int(encoded_len.max().item()) if hasattr(encoded_len, "max") else -1,
+                        int(empty_h),
+                        int(len(hyps)),
+                        int(empty_r),
+                        int(len(refs)),
+                    )
 
             if self.reward_mode == "mwer":
                 rewards = compute_mwer_reward(hyps, refs)
@@ -674,22 +1067,60 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
             else:
                 rewards = compute_mwer_reward(hyps, refs)
 
-            rewards = rewards.to(ctc_loss.device)
+            rewards = rewards.detach().cpu()
             if rewards.numel() == batch_sz:
-                self._cached_batch_reward = rewards.detach().cpu()
+                self._cached_batch_reward = rewards
             else:
                 self._cached_batch_reward = None
 
-        rewards = rewards.to(ctc_loss.device)
+        # Move reward vector to device for weighting
+        rewards = rewards.to(signal.device)
         if rewards.numel() != batch_sz:
-            rewards = torch.ones(batch_sz, device=ctc_loss.device, dtype=torch.float32) * 0.5
-        penalty = 1.0 - rewards.mean()
-        total_loss = ctc_loss + self.reward_weight * penalty
+            rewards = torch.ones(batch_sz, device=signal.device, dtype=torch.float32) * 0.5
+
+        # Compute per-sample CTC loss with gradient.
+        log_probs_g, encoded_len_g, _ = self.forward(input_signal=signal, input_signal_length=signal_len)
+        lp = log_probs_g.transpose(0, 1)  # [T,B,V]
+        input_lengths = encoded_len_g.to(torch.int32)
+        target_lengths = transcript_len.to(torch.int32)
+        chunks = []
+        for i in range(batch_sz):
+            tl = int(target_lengths[i].item())
+            if tl > 0:
+                chunks.append(transcript[i, :tl].to(torch.int32))
+        targets_flat = torch.cat(chunks) if chunks else torch.zeros((0,), device=lp.device, dtype=torch.int32)
+        blank = 0
+        for attr in ("blank_idx", "blank_id"):
+            if hasattr(self.decoder, attr):
+                try:
+                    blank = int(getattr(self.decoder, attr))
+                    break
+                except Exception:
+                    pass
+        ctc_per = F.ctc_loss(
+            lp,
+            targets_flat,
+            input_lengths=input_lengths,
+            target_lengths=target_lengths,
+            blank=blank,
+            reduction="none",
+            zero_infinity=True,
+        )
+
+        # RL objective
+        if CFG.RL_OBJECTIVE == "add_penalty":
+            penalty = 1.0 - rewards.mean()
+            total_loss = ctc_per.mean() + float(self.reward_weight) * penalty
+        else:
+            # Upweight low-reward samples -> changes gradient magnitudes.
+            weights = 1.0 + float(self.reward_weight) * (1.0 - rewards.detach())
+            total_loss = (ctc_per * weights).mean()
+            penalty = 1.0 - rewards.mean()
 
         self._step_logs.append(
             {
                 "step": int(batch_idx),
-                "ctc_loss": float(ctc_loss.item()),
+                "ctc_loss": float(ctc_per.mean().item()),
                 "reward_mean": float(rewards.mean().item()),
                 "penalty": float(penalty.item()),
                 "total_loss": float(total_loss.item()),
@@ -698,13 +1129,15 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
             }
         )
 
-        if isinstance(result, dict):
-            result["loss"] = total_loss
-            return result
-        return total_loss
+        return {"loss": total_loss}
 
     model.training_step = types.MethodType(patched_training_step, model)
-    logger.info("Reward injection enabled (every %d steps, long_audio guard=%d)", CFG.REWARD_STEP_INTERVAL, CFG.MAX_ENCODER_LEN_FOR_REWARD)
+    logger.info(
+        "Reward injection enabled (every %d steps, long_audio guard: > %.1fs at %d Hz)",
+        CFG.REWARD_STEP_INTERVAL,
+        float(CFG.MAX_AUDIO_SECONDS_FOR_REWARD),
+        int(CFG.SAMPLE_RATE),
+    )
     return model
 
 
@@ -714,6 +1147,8 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
 
 
 def _trainer_precision() -> str:
+    if CFG.FORCE_FP32:
+        return "32-true"
     return "16-mixed" if torch.cuda.is_available() else "32-true"
 
 
@@ -738,6 +1173,68 @@ def create_trainer(num_epochs: int, warmup_steps: int, lr: float, csv_log: Path)
         enable_checkpointing=False,
         logger=False,
         callbacks=[cb],
+    )
+    optim = OmegaConf.create(
+        {
+            "name": "adamw",
+            "lr": lr,
+            "weight_decay": 1e-3,
+            "sched": {"name": "CosineAnnealing", "warmup_steps": warmup_steps, "min_lr": 1e-6},
+        }
+    )
+    return trainer, optim
+
+
+def create_trainer_with_artifacts(
+    *,
+    num_epochs: int,
+    warmup_steps: int,
+    lr: float,
+    csv_log: Path,
+    run_dir: Path,
+    stage: str,
+    val_manifest: str,
+) -> Tuple[pl.Trainer, DictConfig]:
+    """Trainer factory that enables checkpoints + optional debug dumps."""
+    cb_metrics = NemoTrainingLogger(csv_log)
+    callbacks: List[Callback] = [cb_metrics]
+
+    # Checkpointing (resume-able)
+    ckpt_dir = run_dir / "checkpoints" / stage
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    callbacks.append(
+        ModelCheckpoint(
+            dirpath=str(ckpt_dir),
+            filename="{epoch}-{step}",
+            save_last=True,
+            every_n_epochs=1,
+        )
+    )
+
+    # Debug sample dumps (text-only)
+    if CFG.DEBUG_SAMPLE_DUMP:
+        callbacks.append(
+            SampleTranscriptionDumper(
+                run_dir=run_dir,
+                stage=stage,
+                val_manifest=val_manifest,
+                dump_every_n_steps=CFG.DEBUG_SAMPLE_EVERY_N_STEPS,
+                n_examples=CFG.DEBUG_SAMPLE_COUNT,
+                seed=CFG.SEED,
+            )
+        )
+
+    trainer = pl.Trainer(
+        devices=1,
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        max_epochs=num_epochs,
+        precision=_trainer_precision(),
+        log_every_n_steps=10,
+        val_check_interval=1.0,
+        enable_checkpointing=True,
+        gradient_clip_val=float(CFG.GRAD_CLIP_VAL) if CFG.GRAD_CLIP_VAL else 0.0,
+        logger=False,
+        callbacks=callbacks,
     )
     optim = OmegaConf.create(
         {
@@ -787,24 +1284,89 @@ def upload_dir_to_gcs(local_dir: str, gcs_prefix: Optional[str]) -> None:
 # ===========================================================================
 
 
-def run_sft_stage(train_manifest: str, val_manifest: str, save_path: str, csv_path: Path) -> Tuple[EncDecCTCModelBPE, Dict[str, Any]]:
+def run_sft_stage(
+    train_manifest: str,
+    val_manifest: str,
+    save_path: str,
+    csv_path: Path,
+    *,
+    run_dir: Path,
+    resume_ckpt: Optional[str] = None,
+) -> Tuple[EncDecCTCModelBPE, Dict[str, Any]]:
     logger.info("=" * 60 + "\nSTAGE 1: SFT\n" + "=" * 60)
     model = load_model_for_sft(CFG.NEMO_MODEL_NAME)
     data_cfg = build_data_config(train_manifest, val_manifest)
     model.setup_training_data(data_cfg.train_ds)
     model.setup_validation_data(data_cfg.validation_ds)
+    # Tokenizer UNK diagnostics (common cause of '⁇' collapse on small data).
+    try:
+        stats_train = tokenizer_unk_stats(train_manifest, model.tokenizer, sample_n=200, seed=CFG.SEED)
+        stats_val = tokenizer_unk_stats(val_manifest, model.tokenizer, sample_n=200, seed=CFG.SEED + 1)
+        logger.info("[tokenizer] train unk stats: %s", stats_train)
+        logger.info("[tokenizer] val unk stats: %s", stats_val)
+        if CFG.TOKENIZER_UNK_GUARD and stats_train.get("mean_unk_frac") is not None:
+            if float(stats_train["mean_unk_frac"]) >= float(CFG.TOKENIZER_UNK_WARN_FRAC):
+                logger.warning(
+                    "[tokenizer] High mean UNK fraction in training targets (%.3f). "
+                    "This often causes models to learn to emit only UNK ('⁇'). "
+                    "Consider enabling --normalize_text (or improving normalization).",
+                    float(stats_train["mean_unk_frac"]),
+                )
+    except Exception as e:
+        logger.warning("[tokenizer] UNK stats failed: %s", e)
     n_train = count_manifest_lines(train_manifest)
     warmup = compute_warmup_steps(n_train, CFG.BATCH_SIZE, CFG.SFT_EPOCHS)
-    trainer, optim = create_trainer(CFG.SFT_EPOCHS, warmup, CFG.LEARNING_RATE_SFT, csv_path)
+    trainer, optim = create_trainer_with_artifacts(
+        num_epochs=CFG.SFT_EPOCHS,
+        warmup_steps=warmup,
+        lr=CFG.LEARNING_RATE_SFT,
+        csv_log=csv_path,
+        run_dir=run_dir,
+        stage="sft",
+        val_manifest=val_manifest,
+    )
     model.set_trainer(trainer)
     model.setup_optimization(optim)
     t0 = time.time()
-    trainer.fit(model)
+    trainer.fit(model, ckpt_path=resume_ckpt)
     train_time = time.time() - t0
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     model.save_to(save_path)
+    # Also save a stage-local copy next to checkpoints/debug artifacts.
+    try:
+        stage_local = run_dir / "exports" / "sft_model.nemo"
+        stage_local.parent.mkdir(parents=True, exist_ok=True)
+        model.save_to(str(stage_local))
+    except Exception as e:
+        logger.warning("Could not save stage-local SFT .nemo: %s", e)
     upload_to_gcs(save_path, CFG.UPLOAD_GCS_URI)
     metrics = evaluate_manifest_bundle(model, val_manifest)
+    # Sanity guard: empty/degenerate hypotheses often manifest as WER=100 everywhere.
+    if metrics.get("_hyps"):
+        empty_frac, _ = summarize_empty_hyps(metrics["_hyps"])
+        deg_frac, mean_len = summarize_degenerate_hyps(metrics["_hyps"])
+        metrics["_empty_hyp_frac"] = empty_frac
+        metrics["_degenerate_hyp_frac"] = deg_frac
+        metrics["_mean_hyp_len_chars"] = mean_len
+        if deg_frac >= float(CFG.EMPTY_HYP_WARN_FRAC):
+            logger.warning(
+                "[sanity] High degenerate hypothesis rate after SFT eval: %.1f%% (mean_len=%.1f chars).",
+                100.0 * deg_frac,
+                mean_len,
+            )
+            # Force an immediate debug dump for inspection.
+            if CFG.DEBUG_SAMPLE_DUMP:
+                try:
+                    SampleTranscriptionDumper(
+                        run_dir=run_dir,
+                        stage="sft",
+                        val_manifest=val_manifest,
+                        dump_every_n_steps=CFG.DEBUG_SAMPLE_EVERY_N_STEPS,
+                        n_examples=CFG.DEBUG_SAMPLE_COUNT,
+                        seed=CFG.SEED,
+                    )._dump(trainer, model, reason="forced_after_sft_eval_empty_hyps")
+                except Exception as e:
+                    logger.warning("[sanity] Failed to force SFT debug dump: %s", e)
     metrics["train_time_s"] = train_time
     for k in ("_refs", "_hyps"):
         metrics.pop(k, None)
@@ -817,6 +1379,9 @@ def run_rl_stage(
     val_manifest: str,
     save_path: str,
     csv_path: Path,
+    *,
+    run_dir: Path,
+    resume_ckpt: Optional[str] = None,
 ) -> Tuple[EncDecCTCModelBPE, Dict[str, Any]]:
     logger.info("=" * 60 + "\nSTAGE 2: RL (%s)\n" % CFG.REWARD_MODE + "=" * 60)
     model = load_model_for_rl(sft_checkpoint, CFG.REWARD_MODE, CFG.REWARD_WEIGHT)
@@ -825,16 +1390,42 @@ def run_rl_stage(
     model.setup_validation_data(data_cfg.validation_ds)
     n_train = count_manifest_lines(train_manifest)
     warmup = compute_warmup_steps(n_train, CFG.BATCH_SIZE, CFG.RL_EPOCHS)
-    trainer, optim = create_trainer(CFG.RL_EPOCHS, warmup, CFG.LEARNING_RATE_RL, csv_path)
+    trainer, optim = create_trainer_with_artifacts(
+        num_epochs=CFG.RL_EPOCHS,
+        warmup_steps=warmup,
+        lr=CFG.LEARNING_RATE_RL,
+        csv_log=csv_path,
+        run_dir=run_dir,
+        stage="rl",
+        val_manifest=val_manifest,
+    )
     model.set_trainer(trainer)
     model.setup_optimization(optim)
     t0 = time.time()
-    trainer.fit(model)
+    trainer.fit(model, ckpt_path=resume_ckpt)
     train_time = time.time() - t0
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     model.save_to(save_path)
+    try:
+        stage_local = run_dir / "exports" / "rl_model.nemo"
+        stage_local.parent.mkdir(parents=True, exist_ok=True)
+        model.save_to(str(stage_local))
+    except Exception as e:
+        logger.warning("Could not save stage-local RL .nemo: %s", e)
     upload_to_gcs(save_path, CFG.UPLOAD_GCS_URI)
     metrics = evaluate_manifest_bundle(model, val_manifest)
+    if metrics.get("_hyps"):
+        empty_frac, _ = summarize_empty_hyps(metrics["_hyps"])
+        deg_frac, mean_len = summarize_degenerate_hyps(metrics["_hyps"])
+        metrics["_empty_hyp_frac"] = empty_frac
+        metrics["_degenerate_hyp_frac"] = deg_frac
+        metrics["_mean_hyp_len_chars"] = mean_len
+        if deg_frac >= float(CFG.EMPTY_HYP_WARN_FRAC):
+            logger.warning(
+                "[sanity] High degenerate hypothesis rate after RL eval: %.1f%% (mean_len=%.1f chars).",
+                100.0 * deg_frac,
+                mean_len,
+            )
     metrics["train_time_s"] = train_time
     traj = [float(x["reward_mean"]) for x in model._step_logs]
     metrics["reward_trajectory"] = traj
@@ -882,7 +1473,7 @@ def _dataset_loader_kwargs() -> dict:
 
 def prepare_manifests() -> Dict[str, str]:
     if CFG.DATASET == "afrispeech_clinical":
-        return prepare_afrispeech_clinical_manifests_streaming(
+        out = prepare_afrispeech_clinical_manifests_streaming(
             train_n=CFG.TRAIN_SAMPLES,
             val_n=CFG.VAL_SAMPLES,
             test_n=CFG.TEST_SAMPLES,
@@ -891,6 +1482,14 @@ def prepare_manifests() -> Dict[str, str]:
             audio_base_dir=_SHARED_AUDIO_DIR,
             manifest_dir=_SHARED_MANIFEST_DIR,
         )
+        if CFG.NORMALIZE_TEXT:
+            norm_dir = Path(CFG.RESULTS_DIR) / "normalized_manifests"
+            norm_dir.mkdir(parents=True, exist_ok=True)
+            out["train"] = maybe_write_normalized_manifest(out["train"], str(norm_dir / Path(out["train"]).name))
+            out["val"] = maybe_write_normalized_manifest(out["val"], str(norm_dir / Path(out["val"]).name))
+            if "test" in out:
+                out["test"] = maybe_write_normalized_manifest(out["test"], str(norm_dir / Path(out["test"]).name))
+        return out
     ds, text_field = load_dataset_bundle(CFG.DATASET, **_dataset_loader_kwargs())
     # Audio is written to data/audio/<dataset_name>/ so clips from different
     # datasets never share a directory and WAV filenames cannot collide.
@@ -900,6 +1499,13 @@ def prepare_manifests() -> Dict[str, str]:
     out["val"] = build_nemo_manifest(ds["validation"], CFG.DATASET, "val", audio_dir, _SHARED_MANIFEST_DIR, text_field)
     if "test" in ds:
         out["test"] = build_nemo_manifest(ds["test"], CFG.DATASET, "test", audio_dir, _SHARED_MANIFEST_DIR, text_field)
+    if CFG.NORMALIZE_TEXT:
+        norm_dir = Path(CFG.RESULTS_DIR) / "normalized_manifests"
+        norm_dir.mkdir(parents=True, exist_ok=True)
+        out["train"] = maybe_write_normalized_manifest(out["train"], str(norm_dir / Path(out["train"]).name))
+        out["val"] = maybe_write_normalized_manifest(out["val"], str(norm_dir / Path(out["val"]).name))
+        if "test" in out:
+            out["test"] = maybe_write_normalized_manifest(out["test"], str(norm_dir / Path(out["test"]).name))
     return out
 
 
@@ -940,13 +1546,15 @@ def run_full_pipeline() -> Dict[str, Any]:
     test_m = manifests.get("test")
 
     run_id = f"{CFG.DATASET}_seed{CFG.SEED}_{int(time.time())}"
+    run_dir = Path(CFG.RESULTS_DIR) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
     cfg_dump = asdict(CFG)
     for k, v in list(cfg_dump.items()):
         if isinstance(v, frozenset):
             cfg_dump[k] = sorted(v)
         if k.startswith("_"):
             cfg_dump.pop(k, None)
-    results: Dict[str, Any] = {"run_id": run_id, "config": cfg_dump}
+    results: Dict[str, Any] = {"run_id": run_id, "config": cfg_dump, "run_dir": str(run_dir)}
 
     if CFG.RUN_ZERO_SHOT:
         results["zero_shot_val"] = evaluate_zero_shot_bundle(val_m)
@@ -956,7 +1564,8 @@ def run_full_pipeline() -> Dict[str, Any]:
         train_m,
         val_m,
         sft_ckpt,
-        Path(CFG.RESULTS_DIR) / f"{run_id}_sft_epoch_metrics.csv",
+        run_dir / f"{run_id}_sft_epoch_metrics.csv",
+        run_dir=run_dir,
     )
     results["sft"] = sft_metrics
     results["sft_checkpoint"] = sft_ckpt
@@ -972,7 +1581,8 @@ def run_full_pipeline() -> Dict[str, Any]:
         train_m,
         val_m,
         rl_ckpt,
-        Path(CFG.RESULTS_DIR) / f"{run_id}_rl_epoch_metrics.csv",
+        run_dir / f"{run_id}_rl_epoch_metrics.csv",
+        run_dir=run_dir,
     )
     results["rl"] = rl_metrics
     results["rl_checkpoint"] = rl_ckpt
@@ -1004,9 +1614,16 @@ def run_full_pipeline() -> Dict[str, Any]:
             for k in ("_refs", "_hyps"):
                 results[section].pop(k, None)
 
-    out_path = Path(CFG.RESULTS_DIR) / f"{run_id}_results.json"
+    results["debug_sample_paths"] = {
+        "sft": str(run_dir / "debug" / "debug_samples_sft.jsonl"),
+        "rl": str(run_dir / "debug" / "debug_samples_rl.jsonl"),
+    }
+    results["lightning_checkpoint_dirs"] = {"sft": str(run_dir / "checkpoints" / "sft"), "rl": str(run_dir / "checkpoints" / "rl")}
+
+    out_path = run_dir / f"{run_id}_results.json"
     save_results_json(results, out_path)
     upload_dir_to_gcs(_SHARED_MANIFEST_DIR, CFG.UPLOAD_GCS_URI)
+    upload_dir_to_gcs(str(run_dir), CFG.UPLOAD_GCS_URI)
 
     logger.info("Done. Key val WER: sft=%.2f rl=%.2f", sft_metrics["wer"], rl_metrics["wer"])
     return results
@@ -1015,27 +1632,50 @@ def run_full_pipeline() -> Dict[str, Any]:
 def run_sft_only() -> Dict[str, Any]:
     manifests = prepare_manifests()
     run_id = f"{CFG.DATASET}_seed{CFG.SEED}_sft_{int(time.time())}"
+    run_dir = Path(CFG.RESULTS_DIR) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
     _, sft_metrics = run_sft_stage(
         manifests["train"],
         manifests["val"],
         os.path.join(CFG.CHECKPOINT_DIR, "sft_model.nemo"),
-        Path(CFG.RESULTS_DIR) / f"{run_id}_sft_epoch_metrics.csv",
+        run_dir / f"{run_id}_sft_epoch_metrics.csv",
+        run_dir=run_dir,
     )
-    save_results_json({"run_id": run_id, "sft": sft_metrics}, Path(CFG.RESULTS_DIR) / f"{run_id}_results.json")
+    payload = {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "sft": sft_metrics,
+        "debug_sample_paths": {"sft": str(run_dir / "debug" / "debug_samples_sft.jsonl")},
+        "lightning_checkpoint_dirs": {"sft": str(run_dir / "checkpoints" / "sft")},
+    }
+    save_results_json(payload, run_dir / f"{run_id}_results.json")
+    upload_dir_to_gcs(str(run_dir), CFG.UPLOAD_GCS_URI)
     return sft_metrics
 
 
-def run_rl_only(sft_checkpoint: str) -> Dict[str, Any]:
+def run_rl_only(sft_checkpoint: str, *, resume_ckpt: Optional[str] = None) -> Dict[str, Any]:
     manifests = prepare_manifests()
     run_id = f"{CFG.DATASET}_seed{CFG.SEED}_rl_{int(time.time())}"
+    run_dir = Path(CFG.RESULTS_DIR) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
     _, rl_metrics = run_rl_stage(
         sft_checkpoint,
         manifests["train"],
         manifests["val"],
         os.path.join(CFG.CHECKPOINT_DIR, "rl_model.nemo"),
-        Path(CFG.RESULTS_DIR) / f"{run_id}_rl_epoch_metrics.csv",
+        run_dir / f"{run_id}_rl_epoch_metrics.csv",
+        run_dir=run_dir,
+        resume_ckpt=resume_ckpt,
     )
-    save_results_json({"run_id": run_id, "rl": rl_metrics}, Path(CFG.RESULTS_DIR) / f"{run_id}_results.json")
+    payload = {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "rl": rl_metrics,
+        "debug_sample_paths": {"rl": str(run_dir / "debug" / "debug_samples_rl.jsonl")},
+        "lightning_checkpoint_dirs": {"rl": str(run_dir / "checkpoints" / "rl")},
+    }
+    save_results_json(payload, run_dir / f"{run_id}_results.json")
+    upload_dir_to_gcs(str(run_dir), CFG.UPLOAD_GCS_URI)
     return rl_metrics
 
 
@@ -1061,6 +1701,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use_lora", action="store_true")
     p.add_argument("--mock_llm", action="store_true", help="Force mock LLM reward")
     p.add_argument("--real_llm", action="store_true", help="Use Gemini for llm reward (needs GEMINI_API_KEY)")
+    p.add_argument("--debug_reward", action="store_true", help="Verbose reward compute/skip logging")
+    p.add_argument("--max_audio_seconds_for_reward", type=float, default=None, help="Skip reward compute for utterances longer than this many seconds")
+    p.add_argument("--debug_sample_dump", action="store_true", help="Write periodic ref/hyp samples to results/<run_id>/debug/")
+    p.add_argument("--debug_sample_every_n_steps", type=int, default=None, help="Dump samples every N optimizer steps")
+    p.add_argument("--debug_sample_count", type=int, default=None, help="Number of utterances per dump")
+    p.add_argument("--resume_sft_ckpt", type=str, default=None, help="Resume SFT from a Lightning .ckpt (results/<run_id>/checkpoints/sft/last.ckpt)")
+    p.add_argument("--resume_rl_ckpt", type=str, default=None, help="Resume RL from a Lightning .ckpt (results/<run_id>/checkpoints/rl/last.ckpt)")
+    p.add_argument("--normalize_text", action="store_true", help="Normalize manifest text (lowercase, strip punctuation) to reduce tokenizer UNK collapse")
+    p.add_argument("--force_fp32", action="store_true", help="Force fp32 training/eval (disables AMP)")
+    p.add_argument("--grad_clip_val", type=float, default=None, help="Gradient clipping value (Lightning Trainer)")
+    p.add_argument("--rl_objective", type=str, default=None, choices=["reweight_ctc", "add_penalty"], help="Stage-2 objective for reward integration")
     p.add_argument("--skip_zero_shot", action="store_true")
     p.add_argument("--skip_librispeech_forgetting", action="store_true")
     p.add_argument("--skip_test_eval", action="store_true")
@@ -1091,6 +1742,8 @@ def main() -> None:
         CFG.REWARD_MODE = args.reward_mode
     if args.reward_weight is not None:
         CFG.REWARD_WEIGHT = args.reward_weight
+    if args.max_audio_seconds_for_reward is not None:
+        CFG.MAX_AUDIO_SECONDS_FOR_REWARD = float(args.max_audio_seconds_for_reward)
     if args.upload_gcs:
         CFG.UPLOAD_GCS_URI = args.upload_gcs.rstrip("/")
     CFG.USE_LORA = args.use_lora
@@ -1098,6 +1751,22 @@ def main() -> None:
         CFG.USE_MOCK_LLM = True
     if args.real_llm:
         CFG.USE_MOCK_LLM = False
+    if args.debug_reward:
+        CFG.DEBUG_REWARD = True
+    if args.debug_sample_dump:
+        CFG.DEBUG_SAMPLE_DUMP = True
+    if args.debug_sample_every_n_steps is not None:
+        CFG.DEBUG_SAMPLE_EVERY_N_STEPS = int(args.debug_sample_every_n_steps)
+    if args.debug_sample_count is not None:
+        CFG.DEBUG_SAMPLE_COUNT = int(args.debug_sample_count)
+    if args.normalize_text:
+        CFG.NORMALIZE_TEXT = True
+    if args.force_fp32:
+        CFG.FORCE_FP32 = True
+    if args.grad_clip_val is not None:
+        CFG.GRAD_CLIP_VAL = float(args.grad_clip_val)
+    if args.rl_objective:
+        CFG.RL_OBJECTIVE = args.rl_objective
     if args.skip_zero_shot:
         CFG.RUN_ZERO_SHOT = False
     if args.skip_librispeech_forgetting:
@@ -1119,11 +1788,33 @@ def main() -> None:
             CFG.TEST_SAMPLES = None
 
     if args.stage == "sft":
-        run_sft_only()
+        # For SFT-only we currently resume by re-running the SFT stage with ckpt_path.
+        # (The stage wrapper creates the trainer and uses trainer.fit(..., ckpt_path=...)).
+        manifests = prepare_manifests()
+        run_id = f"{CFG.DATASET}_seed{CFG.SEED}_sft_{int(time.time())}"
+        run_dir = Path(CFG.RESULTS_DIR) / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _, sft_metrics = run_sft_stage(
+            manifests["train"],
+            manifests["val"],
+            os.path.join(CFG.CHECKPOINT_DIR, "sft_model.nemo"),
+            run_dir / f"{run_id}_sft_epoch_metrics.csv",
+            run_dir=run_dir,
+            resume_ckpt=args.resume_sft_ckpt,
+        )
+        payload = {
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "sft": sft_metrics,
+            "debug_sample_paths": {"sft": str(run_dir / "debug" / "debug_samples_sft.jsonl")},
+            "lightning_checkpoint_dirs": {"sft": str(run_dir / "checkpoints" / "sft")},
+        }
+        save_results_json(payload, run_dir / f"{run_id}_results.json")
+        upload_dir_to_gcs(str(run_dir), CFG.UPLOAD_GCS_URI)
     elif args.stage == "rl":
         if not args.sft_checkpoint:
             raise SystemExit("--sft_checkpoint required for --stage rl")
-        run_rl_only(args.sft_checkpoint)
+        run_rl_only(args.sft_checkpoint, resume_ckpt=args.resume_rl_ckpt)
     else:
         run_full_pipeline()
 
