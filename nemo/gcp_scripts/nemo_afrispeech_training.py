@@ -989,6 +989,18 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
         if self.reward_weight == 0.0:
             return original_training_step(batch, batch_idx)
 
+        def _tstats(t: torch.Tensor) -> str:
+            try:
+                return (
+                    f"shape={tuple(t.shape)} dtype={t.dtype} device={t.device} "
+                    f"min={float(torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0).min().item()):.4g} "
+                    f"max={float(torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0).max().item()):.4g} "
+                    f"mean={float(torch.nanmean(torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)).item()):.4g} "
+                    f"finite_frac={float(torch.isfinite(t).float().mean().item()):.4g}"
+                )
+            except Exception:
+                return f"shape={tuple(t.shape)} dtype={t.dtype} device={t.device}"
+
         if hasattr(batch, "audio"):
             signal, signal_len = batch.audio, batch.audio_lens
             transcript, transcript_len = batch.tokens, batch.token_lens
@@ -1017,70 +1029,13 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
                 bool(long_audio),
                 self._cached_batch_reward is not None,
             )
-        if long_audio:
-            if self._cached_batch_reward is not None:
-                rewards = self._cached_batch_reward.to(ctc_loss.device)
-            else:
-                rewards = torch.ones(batch_sz, device=ctc_loss.device, dtype=torch.float32) * 0.5
-        elif not compute_now:
-            if self._cached_batch_reward is not None:
-                rewards = self._cached_batch_reward
-            else:
-                rewards = torch.ones(batch_sz, dtype=torch.float32) * 0.5
-        else:
-            with torch.no_grad():
-                log_probs, encoded_len, _ = self.forward(input_signal=signal, input_signal_length=signal_len)
-                hyps_raw = self.wer.decoding.ctc_decoder_predictions_tensor(
-                    decoder_outputs=log_probs,
-                    decoder_lengths=encoded_len,
-                    return_hypotheses=False,
-                )
-                hyps = [
-                    h.text if hasattr(h, "text") else str(h) if not isinstance(h, str) else h for h in hyps_raw
-                ]
-                refs = []
-                for i in range(transcript.size(0)):
-                    tl = transcript_len[i].item()
-                    ids = transcript[i, :tl].tolist()
-                    refs.append(self.tokenizer.ids_to_text(ids))
-                if CFG.DEBUG_REWARD and (batch_idx < 5 or batch_idx % max(1, CFG.DEBUG_LOG_EVERY_N_STEPS) == 0):
-                    empty_h = sum(1 for x in hyps if not str(x).strip())
-                    empty_r = sum(1 for x in refs if not str(x).strip())
-                    logger.info(
-                        "[reward-debug] step=%d encoded_len_max=%d empty_hyps=%d/%d empty_refs=%d/%d",
-                        int(batch_idx),
-                        int(encoded_len.max().item()) if hasattr(encoded_len, "max") else -1,
-                        int(empty_h),
-                        int(len(hyps)),
-                        int(empty_r),
-                        int(len(refs)),
-                    )
-
-            if self.reward_mode == "mwer":
-                rewards = compute_mwer_reward(hyps, refs)
-            elif self.reward_mode == "wwer":
-                rewards = compute_wwer_reward(hyps, refs)
-            elif self.reward_mode == "llm":
-                rewards = compute_llm_reward(hyps, refs)
-            elif self.reward_mode == "all":
-                rewards = compute_combined_reward(hyps, refs)
-            else:
-                rewards = compute_mwer_reward(hyps, refs)
-
-            rewards = rewards.detach().cpu()
-            if rewards.numel() == batch_sz:
-                self._cached_batch_reward = rewards
-            else:
-                self._cached_batch_reward = None
-
-        # Move reward vector to device for weighting
-        rewards = rewards.to(signal.device)
-        if rewards.numel() != batch_sz:
-            rewards = torch.ones(batch_sz, device=signal.device, dtype=torch.float32) * 0.5
-
-        # Compute per-sample CTC loss with gradient.
+        # Single forward pass (memory parity with SFT).
+        # - Compute CTC-per-sample loss with gradient from this forward.
+        # - If we need rewards this step, decode from DETACHED logits (no second forward).
         log_probs_g, encoded_len_g, _ = self.forward(input_signal=signal, input_signal_length=signal_len)
-        lp = log_probs_g.transpose(0, 1)  # [T,B,V]
+        if not torch.isfinite(log_probs_g).all():
+            raise RuntimeError(f"[rl-debug] log_probs non-finite at step={int(batch_idx)} ({_tstats(log_probs_g)})")
+        lp = log_probs_g.transpose(0, 1).contiguous()  # [T,B,V]
         input_lengths = encoded_len_g.to(torch.int32)
         target_lengths = transcript_len.to(torch.int32)
         chunks = []
@@ -1106,6 +1061,74 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
             reduction="none",
             zero_infinity=True,
         )
+        if not torch.isfinite(ctc_per).all():
+            raise RuntimeError(
+                "[rl-debug] per-sample CTC non-finite at step=%d ctc_per(%s) lp(%s) input_lengths=%s target_lengths=%s targets_flat_len=%d blank=%d"
+                % (
+                    int(batch_idx),
+                    _tstats(ctc_per),
+                    _tstats(lp),
+                    str(input_lengths.detach().cpu().tolist()),
+                    str(target_lengths.detach().cpu().tolist()),
+                    int(targets_flat.numel()),
+                    int(blank),
+                )
+            )
+
+        # Rewards: cache/reuse unless compute_now (and not long_audio).
+        cached = self._cached_batch_reward if self._cached_batch_reward is not None else None
+        if long_audio or (not compute_now):
+            rewards = cached
+        else:
+            with torch.no_grad():
+                hyps_raw = self.wer.decoding.ctc_decoder_predictions_tensor(
+                    decoder_outputs=log_probs_g.detach(),
+                    decoder_lengths=encoded_len_g.detach(),
+                    return_hypotheses=False,
+                )
+            hyps = [h.text if hasattr(h, "text") else str(h) if not isinstance(h, str) else h for h in hyps_raw]
+            refs = []
+            for i in range(transcript.size(0)):
+                tl = transcript_len[i].item()
+                ids = transcript[i, :tl].tolist()
+                refs.append(self.tokenizer.ids_to_text(ids))
+            if CFG.DEBUG_REWARD and (batch_idx < 5 or batch_idx % max(1, CFG.DEBUG_LOG_EVERY_N_STEPS) == 0):
+                empty_h = sum(1 for x in hyps if not str(x).strip())
+                empty_r = sum(1 for x in refs if not str(x).strip())
+                logger.info(
+                    "[reward-debug] step=%d encoded_len_max=%d empty_hyps=%d/%d empty_refs=%d/%d",
+                    int(batch_idx),
+                    int(encoded_len_g.max().item()) if hasattr(encoded_len_g, "max") else -1,
+                    int(empty_h),
+                    int(len(hyps)),
+                    int(empty_r),
+                    int(len(refs)),
+                )
+
+            if self.reward_mode == "mwer":
+                rewards_t = compute_mwer_reward(hyps, refs)
+            elif self.reward_mode == "wwer":
+                rewards_t = compute_wwer_reward(hyps, refs)
+            elif self.reward_mode == "llm":
+                rewards_t = compute_llm_reward(hyps, refs)
+            elif self.reward_mode == "all":
+                rewards_t = compute_combined_reward(hyps, refs)
+            else:
+                rewards_t = compute_mwer_reward(hyps, refs)
+
+            rewards = rewards_t.detach().cpu()
+            self._cached_batch_reward = rewards if rewards.numel() == batch_sz else None
+
+        if rewards is None or rewards.numel() != batch_sz:
+            rewards = torch.ones(batch_sz, device=signal.device, dtype=torch.float32) * 0.5
+        else:
+            rewards = rewards.to(signal.device)
+
+        # Hard-check reward validity (do not silently "fix" for publishable runs).
+        if not torch.isfinite(rewards).all():
+            raise RuntimeError(f"[rl-debug] rewards non-finite at step={int(batch_idx)} ({_tstats(rewards)})")
+        if (rewards < 0.0).any() or (rewards > 1.0).any():
+            raise RuntimeError(f"[rl-debug] rewards out of [0,1] at step={int(batch_idx)} ({_tstats(rewards)})")
 
         # RL objective
         if CFG.RL_OBJECTIVE == "add_penalty":
@@ -1116,6 +1139,11 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
             weights = 1.0 + float(self.reward_weight) * (1.0 - rewards.detach())
             total_loss = (ctc_per * weights).mean()
             penalty = 1.0 - rewards.mean()
+        if not torch.isfinite(total_loss):
+            raise RuntimeError(
+                "[rl-debug] total_loss non-finite at step=%d total_loss(%s) ctc_per(%s) weights(%s) reward_weight=%s"
+                % (int(batch_idx), _tstats(total_loss), _tstats(ctc_per), _tstats(weights), str(self.reward_weight))
+            )
 
         self._step_logs.append(
             {

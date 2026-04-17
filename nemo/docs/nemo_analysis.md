@@ -39,6 +39,32 @@ Optional **`gsutil`** upload of checkpoints, results JSON, and manifest director
 
 ---
 
+## 1.1 What runs when (AfriSpeech vs LibriSpeech) and sample counts
+
+When `CFG.DATASET=afrispeech_clinical` (the default), **training and primary evaluation are on AfriSpeech**.
+
+LibriSpeech is used only for an **optional “catastrophic forgetting” evaluation**:
+
+- It does **not** participate in training for the AfriSpeech run.
+- It is evaluated **twice** in the full pipeline when enabled:
+  - **after SFT** (`results["librispeech_after_sft"]`)
+  - **after stage 2 / “RL”** (`results["librispeech_after_rl"]`)
+
+**Smoke test (`--smoke_test`) sample counts (AfriSpeech clinical):**
+
+- Train: `TRAIN_SAMPLES=30`
+- Val: `VAL_SAMPLES=10`
+- Test: `TEST_SAMPLES=5`
+- LibriSpeech forgetting eval: **disabled** by default in smoke test (`RUN_LIBRISPEECH_FORGETTING=False`)
+
+**Full (non-smoke) sample counts (AfriSpeech clinical):**
+
+- Train: `TRAIN_SAMPLES=None` → all available clinical train utterances (after filtering)
+- Val: `VAL_SAMPLES=None` → all available clinical validation utterances
+- Test: `TEST_SAMPLES=None` → all available clinical test utterances
+- LibriSpeech forgetting eval: enabled by default (`RUN_LIBRISPEECH_FORGETTING=True`) unless `--skip_librispeech_forgetting`
+  - LibriSpeech val subset size: **2,703 utterances**
+
 ## 2. Configuration and hyperparameters (`Config`)
 
 | Area | Defaults (non–smoke-test) | Notes |
