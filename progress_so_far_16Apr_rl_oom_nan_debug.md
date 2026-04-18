@@ -129,3 +129,43 @@ Safe statements:
 
 Do **not** claim improvements from runs where RL is NaN/collapsed.
 
+---
+
+## 9) Full RL failure at step 3649: non-finite per-sample `ctc_per` (wrong CTC blank id)
+
+### 9.1 Symptom
+
+A long RL run aborted with:
+
+- `RuntimeError: [rl-debug] per-sample CTC non-finite ...`
+- `ctc_per` had `finite_frac=0.875` (one sample in an 8-wide batch),
+- `lp` shape `(T,B,V)` with `V=1025`,
+- debug line ended with `blank=0`.
+
+### 9.2 Root cause
+
+NeMo’s `CTCLoss` sets PyTorch CTC `blank` to `self.loss._blank`, which for BPE CTC is typically **`vocab_size`**, i.e. the **last** logit index (here `1024` when `V=1025`).
+
+The RL patch computed `F.ctc_loss(...)` but **defaulted to `blank=0`** when `decoder.blank_*` was not present, which **does not match** NeMo’s CTC loss/decoding configuration.
+
+Mismatching the blank index can yield pathological / non-finite CTC values even when `log_probs` are finite.
+
+### 9.3 Fix
+
+RL `patched_training_step` now resolves the torch CTC blank id in priority order:
+
+1. `self.loss._blank` (NeMo `CTCLoss`, authoritative for training),
+2. `self.wer.decoding.blank_id` (authoritative for decoding),
+3. `decoder.blank_idx` / `decoder.blank_id` if present.
+
+It caches the resolved id on the model to avoid repeated probing.
+
+### 9.4 Do we need more logs?
+
+For **this specific failure mode**, additional logs are not required to explain `blank=0` with `V=1025`.
+
+If a future failure still shows non-finite `ctc_per` **after** blank resolution, then capture:
+
+- the same debug line (it will now print the resolved blank),
+- plus 20–50 lines above the exception (Lightning progress + any `[reward-debug]` lines).
+

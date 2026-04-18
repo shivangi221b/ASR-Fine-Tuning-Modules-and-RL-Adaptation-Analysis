@@ -1001,6 +1001,48 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
             except Exception:
                 return f"shape={tuple(t.shape)} dtype={t.dtype} device={t.device}"
 
+        def _resolve_torch_ctc_blank_id() -> int:
+            """Must match NeMo CTCLoss / decoding; defaulting to 0 is wrong for BPE CTC."""
+            cached = getattr(self, "_rl_torch_ctc_blank_id", None)
+            if isinstance(cached, int) and cached >= 0:
+                return int(cached)
+
+            candidates = []
+            loss = getattr(self, "loss", None)
+            if loss is not None and hasattr(loss, "_blank"):
+                try:
+                    candidates.append(("loss._blank", int(getattr(loss, "_blank"))))
+                except Exception:
+                    pass
+
+            decoding = getattr(getattr(self, "wer", None), "decoding", None)
+            if decoding is not None and hasattr(decoding, "blank_id"):
+                try:
+                    candidates.append(("wer.decoding.blank_id", int(getattr(decoding, "blank_id"))))
+                except Exception:
+                    pass
+
+            decoder = getattr(self, "decoder", None)
+            if decoder is not None:
+                for attr in ("blank_idx", "blank_id"):
+                    if hasattr(decoder, attr):
+                        try:
+                            candidates.append((f"decoder.{attr}", int(getattr(decoder, attr))))
+                        except Exception:
+                            pass
+
+            if not candidates:
+                raise RuntimeError(
+                    "[rl-debug] cannot resolve CTC blank id for torch.nn.functional.ctc_loss "
+                    "(expected NeMo CTCLoss._blank or wer.decoding.blank_id)"
+                )
+
+            blank = int(candidates[0][1])
+            self._rl_torch_ctc_blank_id = blank
+            if CFG.DEBUG_REWARD and batch_idx < 3:
+                logger.info("[reward-debug] resolved torch CTC blank_id=%d via %s", blank, candidates[0][0])
+            return blank
+
         if hasattr(batch, "audio"):
             signal, signal_len = batch.audio, batch.audio_lens
             transcript, transcript_len = batch.tokens, batch.token_lens
@@ -1044,14 +1086,7 @@ def load_model_for_rl(checkpoint_path: str, reward_mode: str, reward_weight: flo
             if tl > 0:
                 chunks.append(transcript[i, :tl].to(torch.int32))
         targets_flat = torch.cat(chunks) if chunks else torch.zeros((0,), device=lp.device, dtype=torch.int32)
-        blank = 0
-        for attr in ("blank_idx", "blank_id"):
-            if hasattr(self.decoder, attr):
-                try:
-                    blank = int(getattr(self.decoder, attr))
-                    break
-                except Exception:
-                    pass
+        blank = _resolve_torch_ctc_blank_id()
         ctc_per = F.ctc_loss(
             lp,
             targets_flat,
