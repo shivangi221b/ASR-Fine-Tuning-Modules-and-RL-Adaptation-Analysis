@@ -187,6 +187,29 @@ This makes stage 2 actually incorporate reward into gradient magnitudes.
 - **Artifacts**: per-run checkpoints + exports + debug dumps are generated and (optionally) uploaded to GCS.
 ---
 
+### 4.1 Observation table: run `afrispeech_clinical_seed42_1776200330` (domain-adaptation slice run)
+
+Command (GCP):
+
+`python3 nemo_afrispeech_training.py --dataset afrispeech_clinical --stage both --train_samples 2000 --val_samples 300 --test_samples 300 --reward_mode mwer --reward_weight 0.02 --rl_objective reweight_ctc --debug_sample_dump`
+
+Key notes:
+
+- This was **not** `--smoke_test` (`SMOKE_TEST=false`), so **LibriSpeech forgetting eval ran** (`RUN_LIBRISPEECH_FORGETTING=true`).
+- LibriSpeech eval loaded `val_n=2703`, but **9 clips were skipped** during manifest writing, so metrics report `n_utterances=2694`.
+
+| Split / metric | Zero-shot | After SFT | After stage 2 (“RL”) | Observation |
+|---|---:|---:|---:|---|
+| **AfriSpeech val WER** (n=300) | 51.13 | 42.01 | 52.05 | Stage 2 **hurt** overall WER on this slice |
+| **AfriSpeech val CER** | 22.55 | 14.65 | 22.31 | CER tracked WER |
+| **AfriSpeech val EWER** | 9.09 | 12.12 | 13.64 | Domain-token WER **worsened** after adaptation here |
+| **AfriSpeech val domain-term F1** | 0.960 | 0.943 | 0.903 | Domain-term accuracy **dropped** after stage 2 |
+| **AfriSpeech test WER** (n=300) | — | 45.58 | 59.96 | Stage 2 hurt on held-out slice as well |
+| **LibriSpeech val WER** (forgetting, n=2694) | — | 4.51 | 6.44 | Stage 2 introduced **measurable forgetting** |
+| **RL reward mean ± std** | — | — | 0.459 ± 0.067 | Reward trajectory non-constant; reward compute path ran |
+| **Bootstrap p-val (SFT vs RL, val WER)** | — | — | 0.493 | No significant difference detected on this small slice |
+
+
 ## 5) What to report in the paper right now vs later
 
 ### 5.1 Safe to report now

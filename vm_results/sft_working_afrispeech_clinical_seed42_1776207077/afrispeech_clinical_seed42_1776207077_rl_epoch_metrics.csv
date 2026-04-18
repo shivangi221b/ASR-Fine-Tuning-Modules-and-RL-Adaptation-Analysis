@@ -1,0 +1,6 @@
+epoch,global_step,stage,val_loss,val_wer
+0,0.0,val_end,,
+0,2039.0,val_end,,
+0,2039.0,train_end,nan,0.9388634562492371
+1,4078.0,val_end,nan,0.9388634562492371
+1,4078.0,train_end,nan,0.9388634562492371
