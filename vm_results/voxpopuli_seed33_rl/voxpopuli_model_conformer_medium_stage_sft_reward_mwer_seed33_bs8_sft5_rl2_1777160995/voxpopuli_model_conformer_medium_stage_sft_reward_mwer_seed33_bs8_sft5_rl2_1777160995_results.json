@@ -1,0 +1,25 @@
+{
+  "run_id": "voxpopuli_model_conformer_medium_stage_sft_reward_mwer_seed33_bs8_sft5_rl2_1777160995",
+  "run_dir": "results/voxpopuli_model_conformer_medium_stage_sft_reward_mwer_seed33_bs8_sft5_rl2_1777160995",
+  "sft": {
+    "wer": 16.01377429568513,
+    "cer": 5.829364216684124,
+    "ser": 100.0,
+    "ewer": 6.736111111111111,
+    "domain_term_precision": 1.0111111111111113,
+    "domain_term_recall": 0.9916666666666667,
+    "domain_term_f1": 0.9905555555555556,
+    "n_utterances": 1742,
+    "_empty_hyp_frac": 0.0,
+    "_degenerate_hyp_frac": 0.0,
+    "_mean_hyp_len_chars": 145.2675086107922,
+    "train_time_s": 57675.48622608185
+  },
+  "sft_checkpoint": "checkpoints/voxpopuli_model_conformer_medium_stage_sft_reward_mwer_seed33_bs8_sft5_rl2_1777160995_sft.nemo",
+  "debug_sample_paths": {
+    "sft": "results/voxpopuli_model_conformer_medium_stage_sft_reward_mwer_seed33_bs8_sft5_rl2_1777160995/debug/debug_samples_sft.jsonl"
+  },
+  "lightning_checkpoint_dirs": {
+    "sft": "results/voxpopuli_model_conformer_medium_stage_sft_reward_mwer_seed33_bs8_sft5_rl2_1777160995/checkpoints/sft"
+  }
+}

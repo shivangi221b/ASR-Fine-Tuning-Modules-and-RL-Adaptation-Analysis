@@ -15,6 +15,7 @@ Loaders (return (DatasetDict, text_field)):
 Manifest builders:
     build_nemo_manifest                        — Decode audio → WAV files + NeMo JSONL manifest
     prepare_afrispeech_clinical_manifests_streaming — Low-RAM streaming path for AfriSpeech clinical
+    prepare_voxpopuli_manifests_streaming      — Low-disk streaming path for VoxPopuli
 """
 
 from .loaders import (
@@ -24,7 +25,11 @@ from .loaders import (
     load_librispeech_eval,
     load_voxpopuli,
 )
-from .manifest import build_nemo_manifest, prepare_afrispeech_clinical_manifests_streaming
+from .manifest import (
+    build_nemo_manifest,
+    prepare_afrispeech_clinical_manifests_streaming,
+    prepare_voxpopuli_manifests_streaming,
+)
 
 __all__ = [
     "load_afrispeech_clinical",
@@ -34,4 +39,5 @@ __all__ = [
     "load_voxpopuli",
     "build_nemo_manifest",
     "prepare_afrispeech_clinical_manifests_streaming",
+    "prepare_voxpopuli_manifests_streaming",
 ]

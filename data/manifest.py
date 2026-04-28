@@ -14,6 +14,7 @@ import gc
 import json
 import logging
 import os
+import shutil
 from typing import Dict, Optional
 
 import librosa
@@ -165,6 +166,154 @@ def prepare_afrispeech_clinical_manifests_streaming(
             hf_name, "test", "test", dataset_name, audio_dir, manifest_dir, test_n
         )
         gc.collect()
+    return out
+
+
+def _stream_voxpopuli_split_to_manifest(
+    hf_split: str,
+    split_name: str,
+    dataset_name: str,
+    audio_dir: str,
+    manifest_dir: str,
+    max_n: Optional[int],
+    seed: int,
+    text_field: str = "normalized_text",
+    min_duration: float = MIN_DURATION_S,
+    max_duration: float = MAX_DURATION_S,
+) -> str:
+    """
+    Stream VoxPopuli English and write compressed audio + manifest without
+    creating the large HuggingFace Arrow cache that can exceed small VM boot disks.
+    """
+    os.makedirs(audio_dir, exist_ok=True)
+    os.makedirs(manifest_dir, exist_ok=True)
+    manifest_path = os.path.join(manifest_dir, f"{dataset_name}_{split_name}.json")
+    logger.info(
+        "  [stream] VoxPopuli split=%s -> manifest %s (cap=%s) ...",
+        hf_split,
+        manifest_path,
+        max_n,
+    )
+    resume_rows = 0
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as existing:
+            resume_rows = sum(1 for line in existing if line.strip())
+        if max_n is not None:
+            resume_rows = min(resume_rows, max_n)
+        if resume_rows:
+            logger.info(
+                "  [stream] Resuming VoxPopuli %s from %d existing manifest rows",
+                split_name,
+                resume_rows,
+            )
+    stream = load_dataset("facebook/voxpopuli", "en", split=hf_split, streaming=True)
+    if max_n is not None and split_name == "train":
+        # Shuffle only capped train subsets. Full-train runs keep canonical order
+        # and avoid maintaining a large shuffle buffer.
+        stream = stream.shuffle(seed=seed, buffer_size=min(10_000, max(1, max_n)))
+
+    written = resume_rows
+    valid_seen = 0
+    skipped = 0
+    seen = 0
+    mode = "a" if resume_rows else "w"
+    with open(manifest_path, mode, encoding="utf-8") as mf:
+        for sample in stream:
+            if max_n is not None and written >= max_n:
+                break
+            seen += 1
+            text = str(sample.get(text_field, "")).strip().lower()
+            if not text:
+                skipped += 1
+                continue
+            audio = sample.get("audio")
+            if not audio or "array" not in audio:
+                skipped += 1
+                continue
+            try:
+                arr = _mono_float32(np.asarray(audio["array"]))
+                sr = int(audio["sampling_rate"])
+                arr, sr = _resample_to_16k(arr, sr)
+            except (TypeError, ValueError, KeyError) as e:
+                logger.debug("skip VoxPopuli row (audio decode): %s", e)
+                skipped += 1
+                continue
+            duration = float(len(arr)) / float(sr)
+            if duration < min_duration or duration > max_duration:
+                skipped += 1
+                continue
+            if valid_seen < resume_rows:
+                valid_seen += 1
+                if valid_seen % 10000 == 0:
+                    logger.info(
+                        "    [stream] %s: fast-forwarded existing rows=%d seen=%d skipped=%d",
+                        split_name,
+                        valid_seen,
+                        seen,
+                        skipped,
+                    )
+                continue
+            valid_seen += 1
+            audio_path = os.path.join(audio_dir, f"{split_name}_{written:06d}.flac")
+            try:
+                # FLAC is lossless and much smaller than raw WAV, which matters
+                # for full VoxPopuli on ~200GB boot disks.
+                sf.write(audio_path, arr, 16000, format="FLAC", subtype="PCM_16")
+            except Exception as e:
+                usage = shutil.disk_usage(audio_dir)
+                free_gb = usage.free / (1024**3)
+                total_gb = usage.total / (1024**3)
+                raise RuntimeError(
+                    "Failed writing VoxPopuli audio at "
+                    f"split={split_name} written={written} seen={seen} skipped={skipped} "
+                    f"path={audio_path!r}; disk free={free_gb:.1f}GB / total={total_gb:.1f}GB. "
+                    "Clean partial audio/cache or increase disk size."
+                ) from e
+            entry = {
+                "audio_filepath": os.path.abspath(audio_path),
+                "text": text,
+                "duration": round(duration, 3),
+            }
+            mf.write(json.dumps(entry) + "\n")
+            written += 1
+            if written % 1000 == 0:
+                logger.info(
+                    "    [stream] %s: written=%d seen=%d skipped=%d",
+                    split_name,
+                    written,
+                    seen,
+                    skipped,
+                )
+    logger.info(
+        "  [stream] Manifest %s: %d rows (%d skipped, %d HF rows seen)",
+        manifest_path,
+        written,
+        skipped,
+        seen,
+    )
+    return manifest_path
+
+
+def prepare_voxpopuli_manifests_streaming(
+    train_n: Optional[int],
+    val_n: int,
+    seed: int,
+    dataset_name: str,
+    audio_base_dir: str,
+    manifest_dir: str,
+) -> Dict[str, str]:
+    """Build VoxPopuli train/val manifests with streaming to avoid large Arrow cache files."""
+    audio_dir = os.path.join(audio_base_dir, dataset_name)
+    out: Dict[str, str] = {}
+    logger.info("Using streaming VoxPopuli manifest path (stream -> WAV + manifest); avoids large Arrow cache.")
+    out["train"] = _stream_voxpopuli_split_to_manifest(
+        "train", "train", dataset_name, audio_dir, manifest_dir, train_n, seed
+    )
+    gc.collect()
+    out["val"] = _stream_voxpopuli_split_to_manifest(
+        "validation", "val", dataset_name, audio_dir, manifest_dir, val_n, seed
+    )
+    gc.collect()
     return out
 
 

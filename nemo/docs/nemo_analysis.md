@@ -1,16 +1,16 @@
 # NVIDIA NeMo: experiment driver + methods (paper-facing)
 
-This document is the **paper-facing methods write-up** for this repository’s NeMo ASR experiment driver: `nemo/gcp_scripts/nemo_afrispeech_training.py`.
+This document is the **paper-facing methods write-up** for this repository’s NeMo ASR experiment driver (the `nemo_afrispeech_training.py` script).
 
 It covers the **two-stage methodology** (SFT → reward-augmented fine-tuning), the **reward definitions and objectives**, and the **hyperparameters** that define each run.
 
-It intentionally **does not** include debugging narrative. (See `progress_so_far_14Apr.md` for the full debug timeline and fixes validation.)
+It intentionally **does not** include debugging narrative.
 
 ---
 
 ## 1. Purpose and high-level flow
 
-**File:** `nemo/gcp_scripts/nemo_afrispeech_training.py`
+**Implementation:** `nemo_afrispeech_training.py`
 
 **Goal:** Domain adaptation for English **CTC-BPE** ASR using a **two-stage** procedure:
 
@@ -28,12 +28,10 @@ It intentionally **does not** include debugging narrative. (See `progress_so_far
 
 **Artifacts (per run):**
 
-- Checkpoints: `CFG.CHECKPOINT_DIR` (default `./checkpoints`) — `sft_model.nemo`, `rl_model.nemo`
-- Per-run metrics CSV: `results/<run_id>/..._{sft,rl}_epoch_metrics.csv`
-- Aggregated JSON: `results/<run_id>/<run_id>_results.json`
-- Lightning resume checkpoints: `results/<run_id>/checkpoints/{sft,rl}/last.ckpt`
-- Stage-local exports: `results/<run_id>/exports/{sft_model.nemo,rl_model.nemo}`
-- Manifests and extracted audio live under the **repo** `data/manifests` and `data/audio` (paths are derived from the script location, not configurable in `Config`)
+- Checkpoints: `sft_model.nemo`, `rl_model.nemo`
+- Per-run epoch-metrics CSVs (Lightning callback)
+- Aggregated per-run results JSON (metrics + config snapshot)
+- Manifests and extracted audio are written under the repository’s shared `data/` directory
 
 Optional **`gsutil`** upload of checkpoints, results JSON, and manifest directory when `UPLOAD_GCS_URI` / `--upload_gcs` is set (skipped in smoke test or if `SKIP_GCS`).
 
@@ -81,7 +79,7 @@ LibriSpeech is used only for an **optional “catastrophic forgetting” evaluat
 | **Stage-2 objective** | `RL_OBJECTIVE=reweight_ctc` | `reweight_ctc` (gradient-affecting) or `add_penalty` (legacy) |
 | **Precision** | `FORCE_FP32=True` | Lightning `precision="32-true"` by default |
 | **Gradient clipping** | `GRAD_CLIP_VAL=1.0` | Lightning `gradient_clip_val` |
-| **Text normalization** | `NORMALIZE_TEXT=False` | `--normalize_text` rewrites manifests in `results/normalized_manifests/` |
+| **Text normalization** | `NORMALIZE_TEXT=False` | `--normalize_text` rewrites manifests into a dedicated normalized-manifests folder under the run outputs |
 | **LoRA** | `USE_LORA=False` | `--use_lora` best-effort adapter attach |
 | **LLM reward** | `GEMINI_MODEL=gemini-1.5-flash`, `USE_MOCK_LLM=True` | `--real_llm` uses Gemini if `GEMINI_API_KEY` |
 | **Eval flags** | Zero-shot, forgetting eval, test eval, bootstrap iters | Toggle via `skip_*` flags |
@@ -92,10 +90,10 @@ Smoke test (`apply_smoke_test_overrides`) shrinks data caps, epochs, batch size,
 
 ## 3. Data preparation and manifests
 
-The script does **not** assume pre-built NeMo manifests for AfriSpeech; it calls into the repo **`data`** package:
+The script does **not** assume pre-built NeMo manifests for AfriSpeech; it calls into the repository’s `data` utilities:
 
-- **`afrispeech_clinical`:** `prepare_afrispeech_clinical_manifests_streaming(...)` → train/val/(optional) test JSONL paths under `data/manifests`, audio under `data/audio`.
-- **`librispeech` / `voxpopuli`:** `load_dataset_bundle` then `build_nemo_manifest` per split; audio under `data/audio/<dataset_name>/` to avoid filename collisions.
+- **`afrispeech_clinical`**: streaming manifest + audio materialization
+- **`librispeech` / `voxpopuli`**: dataset load + manifest build per split
 
 **NeMo dataloader config** (`build_data_config`): 16 kHz, `max_duration` 20 s, `min_duration` 0.5 s on train, `trim_silence=False`, bucketing handled by NeMo defaults on the config dict. Worker count is 0 in smoke test, else 4.
 
@@ -114,7 +112,7 @@ The script does **not** assume pre-built NeMo manifests for AfriSpeech; it calls
 - Optimizer: **AdamW**, `lr=LEARNING_RATE_SFT`, `weight_decay=1e-3`
 - Scheduler: **CosineAnnealing** with `warmup_steps` from `compute_warmup_steps` (~10% of total steps, capped)
 
-**Trainer (Lightning):** single device, GPU if available else CPU, fp32 by default (`FORCE_FP32=True` → `precision="32-true"`), gradient clipping via `GRAD_CLIP_VAL`, per-epoch Lightning checkpoints under `results/<run_id>/checkpoints/sft/`, and CSV metrics via `NemoTrainingLogger`.
+**Trainer (Lightning):** single device, GPU if available else CPU, fp32 by default (`FORCE_FP32=True` → `precision="32-true"`), gradient clipping via `GRAD_CLIP_VAL`, per-epoch Lightning checkpoints under the run’s output directory, and CSV metrics via `NemoTrainingLogger`.
 
 **After SFT:** `model.save_to(save_path)` (`.nemo`), optional GCS upload, **`evaluate_manifest_bundle`** on the validation manifest (WER, CER, SER, domain-centric metrics — see §6).
 
@@ -142,13 +140,22 @@ The script does **not** assume pre-built NeMo manifests for AfriSpeech; it calls
    - References from token ids via `self.tokenizer.ids_to_text`
 6. **Reward vector** (per utterance, values in ~[0,1]):
 
-   - **`mwer`:** `1 - jiwer.wer(ref, hyp)` (clamped)
-   - **`wwer`:** `1 - weighted_wer_rate(...)` with domain term weights (clinical vs parliamentary set by `DATASET`)
-   - **`llm`:** Gemini 0–1 score from a short prompt, per pair; on failure / no key / mock: **MWER with small noise** or plain MWER
-   - **`all`:** average of MWER, WWER, LLM rewards
+   - **`mwer`:** per utterance, `reward = max(0.0, 1.0 - jiwer.wer(ref, hyp))`. If the reference text is empty/blank, returns **0.5** as a neutral default.
+   - **`wwer`:** per utterance, `reward = max(0.0, 1.0 - wwer_rate)` where `wwer_rate` is a **weighted word error rate** computed by dynamic programming alignment over words (a weighted Levenshtein distance). Details:
+     - **Weights** are assigned per **reference** word: weight = `DOMAIN_TERM_WEIGHT` (default 3.0) if the reference token is in the active domain lexicon, else 1.0.
+     - **Deletion** and **substitution** costs use the reference-word weight. **Insertion cost is always 1.0** (not domain-weighted).
+     - The DP distance is normalized by the sum of reference-word weights (so it reduces to ordinary WER when all weights are 1.0), and the final `wwer_rate` is clamped with `min(1.0, distance / denom)`.
+     - If the reference text is empty/blank, returns **0.5** as a neutral default.
+   - **`llm`:** Gemini 0–1 score per pair. Two operational modes:
+     - **Mock / fallback mode** (default unless `--real_llm` and `GEMINI_API_KEY` are set): compute MWER reward, add Gaussian noise (σ=0.02), then clamp to [0, 1].
+     - **Real mode**: calls `google.generativeai` with `GEMINI_MODEL` (default `gemini-1.5-flash`), `temperature=0.0`, `max_output_tokens=16`. Prompt template:
+       - System: `You score automatic speech recognition quality for domain-specific English. Output exactly one number between 0.0 and 1.0 (inclusive), no other text.`
+       - User: `Reference:\n{ref}\nHypothesis:\n{hyp}\nScore:`
+       - Exceptions fall back to MWER for that pair; a small sleep (~50ms) is used for light rate limiting.
+   - **`all`:** equal-weight arithmetic mean: `(mwer + wwer + llm) / 3.0` (each term already in [0,1]).
 
 7. **Stage-2 objective:** controlled by `RL_OBJECTIVE`.
-8. Append step diagnostics to `model._step_logs` (CTC loss, reward mean, penalty/surrogate, flags).
+8. Append step diagnostics to `model._step_logs`. Each logged step records (at minimum) the current CTC loss scalar, mean reward for the batch, the surrogate/penalty scalar used by the chosen objective, the batch index, plus flags indicating whether reward was computed this step vs reused (`compute_now`) and whether it was skipped due to long-audio guard (`long_audio`).
 
 **Stage-2 objective options (`RL_OBJECTIVE` / `--rl_objective`):**
 
@@ -163,6 +170,8 @@ L = \frac{1}{B}\sum_{i=1}^{B} w_i\,\ell_i
 \[
 L = \mathrm{CTC} + \alpha(1-\overline{r})
 \]
+
+**Reward caching + neutral fallback:** Rewards are not recomputed on every step. If `batch_idx % REWARD_STEP_INTERVAL != 0`, or if the long-audio guard triggers, the code will reuse a cached reward tensor when available; otherwise it uses a neutral constant reward of **0.5** for the batch.
 
 **Hyperparameters:** Lower LR (`1e-5`) and fewer epochs (`2`) than SFT to avoid destroying the CTC fit while nudging toward higher reward.
 
@@ -198,7 +207,7 @@ Results are merged into one JSON; large `_refs` / `_hyps` fields are stripped be
 | `--sft_checkpoint` | Required for `--stage rl` |
 | `--dataset {afrispeech_clinical,librispeech,voxpopuli}` | Data domain |
 | `--train_samples`, `--val_samples`, `--test_samples` | Caps for AfriSpeech clinical |
-| `--voxpopuli_train_subset` | Train cap for VoxPopuli |
+| `--voxpopuli_train_subset` | Optional train cap for VoxPopuli; omitted = full train split |
 | `--reward_mode`, `--reward_weight` | Override `REWARD_MODE` / `REWARD_WEIGHT` |
 | `--rl_objective {reweight_ctc,add_penalty}` | Choose stage-2 objective |
 | `--force_fp32` | Force fp32 (default is fp32) |

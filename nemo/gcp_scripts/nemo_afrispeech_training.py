@@ -14,12 +14,13 @@ Datasets:
 Usage:
   python nemo_afrispeech_training.py --smoke_test
   python nemo_afrispeech_training.py --stage sft --dataset afrispeech_clinical
-  python nemo_afrispeech_training.py --stage rl --sft_checkpoint ./checkpoints/sft_model.nemo
+  python nemo_afrispeech_training.py --stage rl --sft_checkpoint ./checkpoints/<run_id>_sft.nemo
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import json
 import logging
@@ -71,6 +72,7 @@ from data import (  # noqa: E402
     load_dataset_bundle,
     load_librispeech_eval,
     prepare_afrispeech_clinical_manifests_streaming,
+    prepare_voxpopuli_manifests_streaming,
 )
 
 import lightning.pytorch as pl
@@ -112,8 +114,8 @@ class Config:
     VAL_SAMPLES: Optional[int] = None  # cap val; None = all clinical validation
     TEST_SAMPLES: Optional[int] = None  # cap test; None = all clinical test
 
-    # VoxPopuli random train subset
-    VOXPOPULI_TRAIN_SUBSET: int = 10_000
+    # VoxPopuli: None = full train split; int = reproducible random train subset.
+    VOXPOPULI_TRAIN_SUBSET: Optional[int] = None
 
     # LibriSpeech (baseline / forgetting): train cap, eval uses full val split slice
     LIBRISPEECH_TRAIN_CAP: int = 5_000
@@ -715,12 +717,15 @@ def entity_wer_from_text(refs: Sequence[str], hyps: Sequence[str], domain: froze
 def domain_term_precision_recall_f1(ref: str, hyp: str, domain: frozenset) -> Tuple[float, float, float]:
     """Token-level precision/recall/F1 on domain vocabulary occurrences."""
     ref_toks = _normalize_text(ref).split()
-    hyp_toks = set(_normalize_text(hyp).split())
+    hyp_toks = _normalize_text(hyp).split()
     ref_dom = [t for t in ref_toks if t in domain]
     if not ref_dom:
         return (float("nan"), float("nan"), float("nan"))
-    tp = sum(1 for t in ref_dom if t in hyp_toks)
-    prec = tp / max(1, len([t for t in hyp_toks if t in domain]))
+    hyp_dom = [t for t in hyp_toks if t in domain]
+    ref_counts = Counter(ref_dom)
+    hyp_counts = Counter(hyp_dom)
+    tp = sum(min(ref_counts[t], hyp_counts[t]) for t in ref_counts)
+    prec = tp / max(1, len(hyp_dom))
     rec = tp / len(ref_dom)
     if prec + rec == 0:
         f1 = 0.0
@@ -1397,7 +1402,7 @@ def run_sft_stage(
     model.save_to(save_path)
     # Also save a stage-local copy next to checkpoints/debug artifacts.
     try:
-        stage_local = run_dir / "exports" / "sft_model.nemo"
+        stage_local = run_dir / "exports" / Path(save_path).name
         stage_local.parent.mkdir(parents=True, exist_ok=True)
         model.save_to(str(stage_local))
     except Exception as e:
@@ -1470,7 +1475,7 @@ def run_rl_stage(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     model.save_to(save_path)
     try:
-        stage_local = run_dir / "exports" / "rl_model.nemo"
+        stage_local = run_dir / "exports" / Path(save_path).name
         stage_local.parent.mkdir(parents=True, exist_ok=True)
         model.save_to(str(stage_local))
     except Exception as e:
@@ -1528,7 +1533,10 @@ def _dataset_loader_kwargs() -> dict:
         val_n = min(50, 2_703) if CFG.SMOKE_TEST else 2_703
         return dict(train_n=CFG.LIBRISPEECH_TRAIN_CAP, val_n=val_n)
     if CFG.DATASET == "voxpopuli":
-        train_n = min(40, CFG.VOXPOPULI_TRAIN_SUBSET) if CFG.SMOKE_TEST else CFG.VOXPOPULI_TRAIN_SUBSET
+        if CFG.SMOKE_TEST:
+            train_n = min(40, CFG.VOXPOPULI_TRAIN_SUBSET) if CFG.VOXPOPULI_TRAIN_SUBSET is not None else 40
+        else:
+            train_n = CFG.VOXPOPULI_TRAIN_SUBSET
         val_n = min(20, 1_750) if CFG.SMOKE_TEST else 1_750
         return dict(train_n=train_n, val_n=val_n, seed=CFG.SEED)
     return {}
@@ -1552,6 +1560,22 @@ def prepare_manifests() -> Dict[str, str]:
             out["val"] = maybe_write_normalized_manifest(out["val"], str(norm_dir / Path(out["val"]).name))
             if "test" in out:
                 out["test"] = maybe_write_normalized_manifest(out["test"], str(norm_dir / Path(out["test"]).name))
+        return out
+    if CFG.DATASET == "voxpopuli":
+        kwargs = _dataset_loader_kwargs()
+        out = prepare_voxpopuli_manifests_streaming(
+            train_n=kwargs["train_n"],
+            val_n=kwargs["val_n"],
+            seed=kwargs["seed"],
+            dataset_name=CFG.DATASET,
+            audio_base_dir=_SHARED_AUDIO_DIR,
+            manifest_dir=_SHARED_MANIFEST_DIR,
+        )
+        if CFG.NORMALIZE_TEXT:
+            norm_dir = Path(CFG.RESULTS_DIR) / "normalized_manifests"
+            norm_dir.mkdir(parents=True, exist_ok=True)
+            out["train"] = maybe_write_normalized_manifest(out["train"], str(norm_dir / Path(out["train"]).name))
+            out["val"] = maybe_write_normalized_manifest(out["val"], str(norm_dir / Path(out["val"]).name))
         return out
     ds, text_field = load_dataset_bundle(CFG.DATASET, **_dataset_loader_kwargs())
     # Audio is written to data/audio/<dataset_name>/ so clips from different
@@ -1597,6 +1621,32 @@ def save_results_json(payload: Dict[str, Any], path: Path) -> None:
     upload_to_gcs(str(path), CFG.UPLOAD_GCS_URI)
 
 
+def _slug(s: str) -> str:
+    return "".join(c.lower() if c.isalnum() else "_" for c in str(s)).strip("_")
+
+
+def build_run_id(stage: str) -> str:
+    """Detailed run id so checkpoints/results never collide across experiments."""
+    model = _slug(CFG.NEMO_MODEL_NAME.replace("stt_en_", "").replace("_ctc_", "_"))
+    parts = [
+        _slug(CFG.DATASET),
+        f"model_{model}",
+        f"stage_{_slug(stage)}",
+        f"reward_{_slug(CFG.REWARD_MODE)}",
+        f"seed{CFG.SEED}",
+        f"bs{CFG.BATCH_SIZE}",
+        f"sft{CFG.SFT_EPOCHS}",
+        f"rl{CFG.RL_EPOCHS}",
+        str(int(time.time())),
+    ]
+    return "_".join(parts)
+
+
+def checkpoint_path(run_id: str, stage: str) -> str:
+    filename = f"{run_id}_{_slug(stage)}.nemo"
+    return str(Path(CFG.CHECKPOINT_DIR) / filename)
+
+
 def run_full_pipeline() -> Dict[str, Any]:
     os.makedirs(CFG.OUTPUT_DIR, exist_ok=True)
     os.makedirs(CFG.CHECKPOINT_DIR, exist_ok=True)
@@ -1608,7 +1658,7 @@ def run_full_pipeline() -> Dict[str, Any]:
     train_m, val_m = manifests["train"], manifests["val"]
     test_m = manifests.get("test")
 
-    run_id = f"{CFG.DATASET}_seed{CFG.SEED}_{int(time.time())}"
+    run_id = build_run_id("both")
     run_dir = Path(CFG.RESULTS_DIR) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg_dump = asdict(CFG)
@@ -1622,7 +1672,7 @@ def run_full_pipeline() -> Dict[str, Any]:
     if CFG.RUN_ZERO_SHOT:
         results["zero_shot_val"] = evaluate_zero_shot_bundle(val_m)
 
-    sft_ckpt = os.path.join(CFG.CHECKPOINT_DIR, "sft_model.nemo")
+    sft_ckpt = checkpoint_path(run_id, "sft")
     sft_model, sft_metrics = run_sft_stage(
         train_m,
         val_m,
@@ -1638,7 +1688,7 @@ def run_full_pipeline() -> Dict[str, Any]:
         libri_manifest = prepare_librispeech_eval_manifest()
         results["librispeech_after_sft"] = catastrophic_forgetting_eval(sft_model, libri_manifest)
 
-    rl_ckpt = os.path.join(CFG.CHECKPOINT_DIR, "rl_model.nemo")
+    rl_ckpt = checkpoint_path(run_id, f"rl_{CFG.REWARD_MODE}")
     rl_model, rl_metrics = run_rl_stage(
         sft_ckpt,
         train_m,
@@ -1694,13 +1744,14 @@ def run_full_pipeline() -> Dict[str, Any]:
 
 def run_sft_only() -> Dict[str, Any]:
     manifests = prepare_manifests()
-    run_id = f"{CFG.DATASET}_seed{CFG.SEED}_sft_{int(time.time())}"
+    run_id = build_run_id("sft")
     run_dir = Path(CFG.RESULTS_DIR) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    sft_ckpt = checkpoint_path(run_id, "sft")
     _, sft_metrics = run_sft_stage(
         manifests["train"],
         manifests["val"],
-        os.path.join(CFG.CHECKPOINT_DIR, "sft_model.nemo"),
+        sft_ckpt,
         run_dir / f"{run_id}_sft_epoch_metrics.csv",
         run_dir=run_dir,
     )
@@ -1708,6 +1759,7 @@ def run_sft_only() -> Dict[str, Any]:
         "run_id": run_id,
         "run_dir": str(run_dir),
         "sft": sft_metrics,
+        "sft_checkpoint": sft_ckpt,
         "debug_sample_paths": {"sft": str(run_dir / "debug" / "debug_samples_sft.jsonl")},
         "lightning_checkpoint_dirs": {"sft": str(run_dir / "checkpoints" / "sft")},
     }
@@ -1718,14 +1770,15 @@ def run_sft_only() -> Dict[str, Any]:
 
 def run_rl_only(sft_checkpoint: str, *, resume_ckpt: Optional[str] = None) -> Dict[str, Any]:
     manifests = prepare_manifests()
-    run_id = f"{CFG.DATASET}_seed{CFG.SEED}_rl_{int(time.time())}"
+    run_id = build_run_id("rl")
     run_dir = Path(CFG.RESULTS_DIR) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    rl_ckpt = checkpoint_path(run_id, f"rl_{CFG.REWARD_MODE}")
     _, rl_metrics = run_rl_stage(
         sft_checkpoint,
         manifests["train"],
         manifests["val"],
-        os.path.join(CFG.CHECKPOINT_DIR, "rl_model.nemo"),
+        rl_ckpt,
         run_dir / f"{run_id}_rl_epoch_metrics.csv",
         run_dir=run_dir,
         resume_ckpt=resume_ckpt,
@@ -1734,6 +1787,8 @@ def run_rl_only(sft_checkpoint: str, *, resume_ckpt: Optional[str] = None) -> Di
         "run_id": run_id,
         "run_dir": str(run_dir),
         "rl": rl_metrics,
+        "sft_checkpoint": sft_checkpoint,
+        "rl_checkpoint": rl_ckpt,
         "debug_sample_paths": {"rl": str(run_dir / "debug" / "debug_samples_rl.jsonl")},
         "lightning_checkpoint_dirs": {"rl": str(run_dir / "checkpoints" / "rl")},
     }
@@ -1756,7 +1811,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train_samples", type=int, default=None, help="Cap AfriSpeech clinical train count (None=all)")
     p.add_argument("--val_samples", type=int, default=None, help="Cap AfriSpeech clinical val count (None=all)")
     p.add_argument("--test_samples", type=int, default=None, help="Cap AfriSpeech clinical test count (None=all)")
-    p.add_argument("--voxpopuli_train_subset", type=int, default=None)
+    p.add_argument("--voxpopuli_train_subset", type=int, default=None, help="Cap VoxPopuli train count (default: full train split)")
     p.add_argument("--reward_mode", type=str, default=None)
     p.add_argument("--reward_weight", type=float, default=None)
     p.add_argument("--seed", type=int, default=42)
@@ -1854,13 +1909,14 @@ def main() -> None:
         # For SFT-only we currently resume by re-running the SFT stage with ckpt_path.
         # (The stage wrapper creates the trainer and uses trainer.fit(..., ckpt_path=...)).
         manifests = prepare_manifests()
-        run_id = f"{CFG.DATASET}_seed{CFG.SEED}_sft_{int(time.time())}"
+        run_id = build_run_id("sft")
         run_dir = Path(CFG.RESULTS_DIR) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        sft_ckpt = checkpoint_path(run_id, "sft")
         _, sft_metrics = run_sft_stage(
             manifests["train"],
             manifests["val"],
-            os.path.join(CFG.CHECKPOINT_DIR, "sft_model.nemo"),
+            sft_ckpt,
             run_dir / f"{run_id}_sft_epoch_metrics.csv",
             run_dir=run_dir,
             resume_ckpt=args.resume_sft_ckpt,
@@ -1869,6 +1925,7 @@ def main() -> None:
             "run_id": run_id,
             "run_dir": str(run_dir),
             "sft": sft_metrics,
+            "sft_checkpoint": sft_ckpt,
             "debug_sample_paths": {"sft": str(run_dir / "debug" / "debug_samples_sft.jsonl")},
             "lightning_checkpoint_dirs": {"sft": str(run_dir / "checkpoints" / "sft")},
         }

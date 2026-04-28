@@ -178,17 +178,18 @@ def load_librispeech_eval(val_n: int = 2_703) -> Tuple[Dataset, str]:
 # ---------------------------------------------------------------------------
 
 def load_voxpopuli(
-    train_n: int = 10_000,
+    train_n: Optional[int] = None,
     val_n: int = 1_750,
     seed: int = 42,
 ) -> Tuple[DatasetDict, str]:
     """
-    Load a random subset of VoxPopuli English.
+    Load VoxPopuli English.
 
     Parameters
     ----------
-    train_n : int
+    train_n : int | None
         Number of training utterances, sampled without replacement using seed.
+        None = full training split.
     val_n : int
         Number of validation utterances (sequential slice).
     seed : int
@@ -198,12 +199,15 @@ def load_voxpopuli(
     -------
     (DatasetDict, "normalized_text")
     """
-    logger.info("Loading VoxPopuli English (train_n=%d, val_n=%d, seed=%d) …", train_n, val_n, seed)
+    logger.info("Loading VoxPopuli English (train_n=%s, val_n=%d, seed=%d) …", train_n, val_n, seed)
     ds_train_full = load_dataset("facebook/voxpopuli", "en", split="train")
-    rng = np.random.RandomState(seed)
-    n_take = min(train_n, len(ds_train_full))
-    indices = rng.choice(len(ds_train_full), size=n_take, replace=False)
-    train_ds = ds_train_full.select(indices.tolist())
+    if train_n is None:
+        train_ds = ds_train_full
+    else:
+        rng = np.random.RandomState(seed)
+        n_take = min(train_n, len(ds_train_full))
+        indices = rng.choice(len(ds_train_full), size=n_take, replace=False)
+        train_ds = ds_train_full.select(indices.tolist())
 
     val_ds = load_dataset("facebook/voxpopuli", "en", split=f"validation[:{val_n}]")
 

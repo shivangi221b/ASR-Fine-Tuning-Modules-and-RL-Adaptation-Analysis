@@ -1,0 +1,15 @@
+{
+  "eval_name": "librispeech_after_rl",
+  "checkpoint_name": "afrispeech_wwer_rl",
+  "checkpoint_path": "checkpoints/rl_model.nemo",
+  "manifest": "data/manifests/librispeech_forgetting_eval.json",
+  "dataset": "afrispeech_clinical",
+  "wer": 10.64789782791088,
+  "cer": 4.165742784036716,
+  "ser": 98.92353377876763,
+  "ewer": 26.923076923076923,
+  "domain_term_precision": 0.7435897435897436,
+  "domain_term_recall": 0.7307692307692307,
+  "domain_term_f1": 0.735042735042735,
+  "n_utterances": 2694
+}

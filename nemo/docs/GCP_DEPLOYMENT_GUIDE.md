@@ -211,11 +211,10 @@ python nemo_afrispeech_training.py --stage rl \
   --upload_gcs gs://adaptive-ai-487419-stt-results/exp1
 ```
 
-**VoxPopuli (random 10k train, official validation — fixed seed in script):**
+**VoxPopuli (full train split by default, official validation):**
 
 ```bash
 python nemo_afrispeech_training.py --stage both --dataset voxpopuli \
-  --voxpopuli_train_subset 10000 \
   --upload_gcs gs://adaptive-ai-487419-stt-results/exp_vox
 ```
 
@@ -273,9 +272,8 @@ python nemo_afrispeech_training.py --stage rl --dataset afrispeech_clinical \
   --reward_mode wwer \
   --upload_gcs gs://adaptive-ai-487419-stt-results/paper/afrispeech_wwer_seed42
 
-# VoxPopuli
+# VoxPopuli (full train split by default)
 python nemo_afrispeech_training.py --stage both --dataset voxpopuli \
-  --voxpopuli_train_subset 10000 \
   --upload_gcs gs://adaptive-ai-487419-stt-results/paper/voxpopuli_mwer_seed42
 ```
 
