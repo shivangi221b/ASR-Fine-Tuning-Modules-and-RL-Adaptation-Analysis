@@ -1,0 +1,20 @@
+{
+  "eval_name": "librispeech_after_voxpopuli_sft",
+  "manifest": "data/manifests/librispeech_forgetting_eval.json",
+  "dataset": "voxpopuli",
+  "batch_size": 8,
+  "seed": 33,
+  "results": {
+    "voxpopuli_sft": {
+      "checkpoint": "checkpoints/voxpopuli_model_conformer_medium_stage_sft_reward_mwer_seed33_bs8_sft5_rl2_1777160995_sft.nemo",
+      "wer": 6.225412510487555,
+      "cer": 2.2627205439820925,
+      "ser": 71.4550853749072,
+      "ewer": 0.0,
+      "domain_term_precision": 1.0,
+      "domain_term_recall": 1.0,
+      "domain_term_f1": 1.0,
+      "n_utterances": 2694
+    }
+  }
+}

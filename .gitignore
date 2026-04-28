@@ -69,6 +69,7 @@ manifests/
 nemo-afrispeech-output/
 results/
 *.nemo
+*.ckpt
 nemo_training.log
 *.log
 lightning_logs/

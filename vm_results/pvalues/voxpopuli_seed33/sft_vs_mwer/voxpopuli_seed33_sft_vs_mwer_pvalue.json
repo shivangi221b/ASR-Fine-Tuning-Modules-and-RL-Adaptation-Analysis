@@ -1,0 +1,35 @@
+{
+  "comparison": "sft_vs_rl_mwer",
+  "manifest": "data/manifests/voxpopuli_val.json",
+  "model_a_name": "sft",
+  "model_a_checkpoint": "checkpoints/voxpopuli_model_conformer_medium_stage_sft_reward_mwer_seed33_bs8_sft5_rl2_1777160995_sft.nemo",
+  "model_a_metrics": {
+    "wer": 16.01377429568513,
+    "cer": 5.829364216684124,
+    "ser": 100.0,
+    "ewer": 6.736111111111111,
+    "domain_term_precision": 1.0111111111111113,
+    "domain_term_recall": 0.9916666666666667,
+    "domain_term_f1": 0.9905555555555556,
+    "n_utterances": 1742
+  },
+  "model_b_name": "rl_mwer",
+  "model_b_checkpoint": "checkpoints/voxpopuli_model_conformer_medium_stage_rl_reward_mwer_seed33_bs8_sft5_rl2_1777223972_rl_mwer.nemo",
+  "model_b_metrics": {
+    "wer": 15.999907555062515,
+    "cer": 5.823830510484397,
+    "ser": 100.0,
+    "ewer": 6.597222222222222,
+    "domain_term_precision": 1.0111111111111113,
+    "domain_term_recall": 0.9916666666666667,
+    "domain_term_f1": 0.9905555555555556,
+    "n_utterances": 1742
+  },
+  "wer_delta_model_a_minus_model_b": 0.013866740622615836,
+  "paired_bootstrap_pvalue_wer": 0.65,
+  "bootstrap_iters": 1000,
+  "seed": 33,
+  "n_utterances": 1742,
+  "interpretation": "Positive WER delta means rl_mwer has lower WER than sft; p-value is two-sided paired bootstrap over utterances.",
+  "predictions_jsonl": "results/pvalues/voxpopuli_seed33/sft_vs_mwer/voxpopuli_seed33_sft_vs_mwer_predictions.jsonl"
+}

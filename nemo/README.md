@@ -56,7 +56,7 @@ python gcp_scripts/nemo_afrispeech_training.py --stage rl \
   --reward_mode wwer
 ```
 
-**Useful flags:** `--use_lora` (encoder adapter), `--mock_llm` / `--real_llm`, `--skip_zero_shot`, `--skip_librispeech_forgetting`, `--skip_test_eval`, `--voxpopuli_train_subset N`.
+**Useful flags:** `--use_lora` (encoder adapter), `--mock_llm` / `--real_llm`, `--skip_zero_shot`, `--skip_librispeech_forgetting`, `--skip_test_eval`, `--voxpopuli_train_subset N` (optional cap; omitted = full VoxPopuli train split).
 
 ## Results persistence
 

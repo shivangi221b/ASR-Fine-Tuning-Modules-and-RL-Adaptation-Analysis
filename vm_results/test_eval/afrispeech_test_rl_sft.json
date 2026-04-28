@@ -1,0 +1,15 @@
+{
+  "eval_name": "afrispeech_test_rl",
+  "checkpoint_name": "sft",
+  "checkpoint_path": "checkpoints/sft_model.nemo",
+  "manifest": "data/manifests/afrispeech_clinical_test.json",
+  "dataset": "afrispeech_clinical",
+  "wer": 50.68194915796887,
+  "cer": 17.13259961155906,
+  "ser": 100.0,
+  "ewer": 23.276108726752504,
+  "domain_term_precision": 0.8068669527896996,
+  "domain_term_recall": 0.8144492131616594,
+  "domain_term_f1": 0.8038626609442061,
+  "n_utterances": 3508
+}

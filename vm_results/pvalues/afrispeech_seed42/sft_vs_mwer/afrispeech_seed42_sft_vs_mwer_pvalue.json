@@ -1,0 +1,35 @@
+{
+  "comparison": "sft_vs_rl_mwer",
+  "manifest": "data/manifests/afrispeech_clinical_val.json",
+  "model_a_name": "sft",
+  "model_a_checkpoint": "checkpoints/sft_model.nemo",
+  "model_a_metrics": {
+    "wer": 45.94373759775884,
+    "cer": 14.193609501086396,
+    "ser": 100.0,
+    "ewer": 20.27027027027027,
+    "domain_term_precision": 0.8415915915915915,
+    "domain_term_recall": 0.8671171171171171,
+    "domain_term_f1": 0.8469969969969972,
+    "n_utterances": 1813
+  },
+  "model_b_name": "rl_mwer",
+  "model_b_checkpoint": "checkpoints/afrispeech_clinical_model_conformer_medium_stage_rl_reward_mwer_seed42_bs8_sft5_rl2_1777307305_rl_mwer.nemo",
+  "model_b_metrics": {
+    "wer": 45.885374109956814,
+    "cer": 14.206042378350217,
+    "ser": 100.0,
+    "ewer": 19.81981981981982,
+    "domain_term_precision": 0.8468468468468469,
+    "domain_term_recall": 0.8783783783783784,
+    "domain_term_f1": 0.8551051051051053,
+    "n_utterances": 1813
+  },
+  "wer_delta_model_a_minus_model_b": 0.05836348780202627,
+  "paired_bootstrap_pvalue_wer": 0.512,
+  "bootstrap_iters": 1000,
+  "seed": 42,
+  "n_utterances": 1813,
+  "interpretation": "Positive WER delta means rl_mwer has lower WER than sft; p-value is two-sided paired bootstrap over utterances.",
+  "predictions_jsonl": "results/pvalues/afrispeech_seed42/sft_vs_mwer/afrispeech_seed42_sft_vs_mwer_predictions.jsonl"
+}

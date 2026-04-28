@@ -1,0 +1,15 @@
+{
+  "eval_name": "afrispeech_test_rl",
+  "checkpoint_name": "wwer_rl",
+  "checkpoint_path": "checkpoints/rl_model.nemo",
+  "manifest": "data/manifests/afrispeech_clinical_test.json",
+  "dataset": "afrispeech_clinical",
+  "wer": 50.99997865573841,
+  "cer": 17.18328003714385,
+  "ser": 100.0,
+  "ewer": 22.86838340486409,
+  "domain_term_precision": 0.8093705293276108,
+  "domain_term_recall": 0.8195994277539342,
+  "domain_term_f1": 0.8084763948497854,
+  "n_utterances": 3508
+}
