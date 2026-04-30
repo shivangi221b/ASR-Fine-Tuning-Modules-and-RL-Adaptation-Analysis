@@ -249,12 +249,13 @@ Transcribes all sets and computes the following metrics (written to `extended_me
 | **Loss** | CTC only (no attention decoder) | CTC + attention (joint; `ctc_weight=0.3`) |
 | **Model** | `stt_en_conformer_ctc_medium` (~30M params, NGC) | `pyf98/librispeech_conformer` (HuggingFace) |
 | **Data format** | NeMo JSONL manifests | Kaldi-style `wav.scp` / `text` |
-| **Data combination** | AfriSpeech only (+ optional LibriSpeech forgetting) | AfriSpeech + VoxPopuli + LibriSpeech subset (combined training) |
-| **Reward mode (run)** | MWER (WWER planned) | WWER (with 37 clinical domain terms) |
+| **Training data** | AfriSpeech-only run ✅; VoxPopuli-only run ✅ | AfriSpeech + VoxPopuli + LibriSpeech combined (single run); VoxPopuli standalone ❌ pending |
+| **Reward modes (run)** | MWER ✅, WWER ✅ (both AfriSpeech + VoxPopuli) | WWER ✅, MWER ❌ pending |
 | **Reward weight** | 0.05 | 0.02 |
 | **SFT precision** | FP32 | AMP (fp16) |
 | **RL precision** | FP32 | FP32 |
-| **Evaluation** | `model.transcribe(...)` (NeMo batch inference) | ESPnet2 `asr_inference.py` (CTC greedy) |
+| **Evaluation sets run** | Val ✅, Test ✅, Zero-shot ✅, LibriSpeech forgetting ✅ | Test ✅, LibriSpeech forgetting ✅; Val extended metrics ❌ pending, Zero-shot ❌ pending |
+| **Evaluation engine** | `model.transcribe(...)` (NeMo batch inference) | ESPnet2 `asr_inference.py` (CTC greedy) |
 | **Metrics** | WER, CER, SER, EWER, domain P/R/F1, bootstrap p-value | Same + degenerate fraction, mean hyp length |
 
 ---

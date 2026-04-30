@@ -63,232 +63,123 @@
 
 **Week 5 & 6: (2nd March \- 13th March)**
 
-* **Gautam:** Investigate ESPNet  
-  * **Architecture Decomposition**
+* **Gautam:** ~~Investigate ESPNet~~  
+  * **~~Architecture Decomposition~~**
 
-    * Document ESPnet2 pipeline: task-specific recipes, model definitions, training/inference separation
+    * ~~Document ESPnet2 pipeline: task-specific recipes, model definitions, training/inference separation~~
 
-    * Analyze hybrid CTC/attention architecture: encoder options (Conformer, Branchformer, Transformer), decoder variants
+    * ~~Analyze hybrid CTC/attention architecture: encoder options (Conformer, Branchformer, Transformer), decoder variants~~
 
-    * Map transfer learning mechanisms: pre-trained model loading, layer freezing, warm-start capabilities
+    * ~~Map transfer learning mechanisms: pre-trained model loading, layer freezing, warm-start capabilities~~
 
-  * **Fine-Tuning Strategy Catalog**
+  * **~~Fine-Tuning Strategy Catalog~~**
 
-    * Document ESPnet's adaptation approaches: layer-wise learning rates, warmup strategies, multi-stage training
+    * ~~Document ESPnet's adaptation approaches: layer-wise learning rates, warmup strategies, multi-stage training~~
 
-    * Examine domain adaptation recipes: what modifications are standard for new domains/speakers?
+    * ~~Examine domain adaptation recipes: what modifications are standard for new domains/speakers?~~
 
-    * Identify customization points in ESPnet config files (.yaml structure)
+    * ~~Identify customization points in ESPnet config files (.yaml structure)~~
 
-  * **RL Compatibility Analysis**
+  * **~~RL Compatibility Analysis~~**
 
-    * Assess training loop modularity: Can the standard trainer be extended for RL?
+    * ~~Assess training loop modularity: Can the standard trainer be extended for RL?~~
 
-    * Evaluate reward integration points: Where can WER/custom metrics influence parameter updates?
+    * ~~Evaluate reward integration points: Where can WER/custom metrics influence parameter updates?~~
 
-    * Check multi-task learning support: Can RL objectives co-exist with supervised objectives?
+    * ~~Check multi-task learning support: Can RL objectives co-exist with supervised objectives?~~
 
-    * Analyze distributed training compatibility for large-scale RL rollouts
+    * ~~Analyze distributed training compatibility for large-scale RL rollouts~~
 
-  * **Practical Validation**
+  * **~~Practical Validation~~**
 
-    * Run ESPnet recipe on LibriSpeech test-clean subset
+    * ~~Run ESPnet recipe on LibriSpeech test-clean subset~~
 
-    * Modify training script to log intermediate predictions for reward computation simulation
+    * ~~Modify training script to log intermediate predictions for reward computation simulation~~
 
-    * Test custom scorer integration (simulate reward model injection)
+    * ~~Test custom scorer integration (simulate reward model injection)~~
 
 * **Shivangi:**  
-  * Investigate NVIDIA NeMo (More details [here](?tab=t.rw18hqd52mvq))  
-    * **Architecture Decomposition**
+  * ~~Investigate NVIDIA NeMo (More details [here](?tab=t.rw18hqd52mvq))~~  
+    * **~~Architecture Decomposition~~**
 
-      * Document NeMo's ASR training pipeline components: data loader, model architecture (FastConformer/Conformer-Transducer), optimizer configuration, loss computation
+      * ~~Document NeMo's ASR training pipeline components: data loader, model architecture (FastConformer/Conformer-Transducer), optimizer configuration, loss computation~~
 
-      * Map the speech\_to\_text\_finetune.py workflow: initialization, training loop, validation, checkpointing
+      * ~~Map the speech\_to\_text\_finetune.py workflow: initialization, training loop, validation, checkpointing~~
 
-      * Identify PEFT integration points: LoRA adapter locations, rank/alpha configuration options, parameter freezing strategies
+      * ~~Identify PEFT integration points: LoRA adapter locations, rank/alpha configuration options, parameter freezing strategies~~
 
-    * **Fine-Tuning Strategy Catalog**
+    * **~~Fine-Tuning Strategy Catalog~~**
 
-      * Document supported methods: Full fine-tuning, LoRA, Adapter modules, BitFit
+      * ~~Document supported methods: Full fine-tuning, LoRA, Adapter modules, BitFit~~
 
-      * Extract parameter efficiency metrics: trainable parameter percentage for each method
+      * ~~Extract parameter efficiency metrics: trainable parameter percentage for each method~~
 
-      * Analyze training speed and memory footprint from NeMo documentation and benchmarks
+      * ~~Analyze training speed and memory footprint from NeMo documentation and benchmarks~~
 
-    * **RL Compatibility Analysis**
+    * **~~RL Compatibility Analysis~~**
 
-      * Examine loss computation flexibility: Can custom reward-based losses replace CTC/RNN-T losses?
+      * ~~Examine loss computation flexibility: Can custom reward-based losses replace CTC/RNN-T losses?~~
 
-      * Assess gradient flow: Are gradients accessible for policy gradient methods?
+      * ~~Assess gradient flow: Are gradients accessible for policy gradient methods?~~
 
-      * Evaluate data pipeline: Can it handle dynamic sampling strategies (experience replay, prioritized sampling)?
+      * ~~Evaluate data pipeline: Can it handle dynamic sampling strategies (experience replay, prioritized sampling)?~~
 
-      * Check checkpoint compatibility: Can intermediate states be saved/restored for RL episode management?
+      * ~~Check checkpoint compatibility: Can intermediate states be saved/restored for RL episode management?~~
 
-    * **Practical Validation**
+    * **~~Practical Validation~~**
 
-      * Run baseline fine-tuning experiment on Common Voice 17.0 subset (1000 samples)
+      * ~~Run baseline fine-tuning experiment on Common Voice 17.0 subset (1000 samples)~~
 
-      * Document actual training loop behavior, logging outputs, and hook points
+      * ~~Document actual training loop behavior, logging outputs, and hook points~~
 
-      * Test custom loss function injection to simulate reward-based training
+      * ~~Test custom loss function injection to simulate reward-based training~~
 
-**Week 7: (16th March \- 20th March): Spring Break \-\> Catch up on backlog**
+**Week 7: (16th March \- 20th March): Spring Break (Holiday)**
 
-**Week 8: (23rd March \- 27th Mach)**
+**Week 8: Catch up on past work**
+
+**Week 9 & 10:**
 
 * **Gautam:**   
-  * **RL Framework Survey**
+  * **~~RL Framework Survey~~**
 
-    * For each framework (Verl, OpenRLHF, TRL, Ray RLlib): Document core capabilities, ASR applicability, integration complexity
+    * ~~For each framework (Verl, OpenRLHF, TRL, Ray RLlib): Document core capabilities, ASR applicability, integration complexity~~
 
-    * Focus on policy gradient implementations: REINFORCE, PPO, A2C support
+    * ~~Focus on policy gradient implementations: REINFORCE, PPO, A2C support~~
 
-    * Assess speech-specific features: handling variable-length sequences, CTC/attention compatibility
+    * ~~Assess speech-specific features: handling variable-length sequences, CTC/attention compatibility~~
 
-    * Evaluate experience replay mechanisms: buffer implementation, sampling strategies
+    * ~~Evaluate experience replay mechanisms: buffer implementation, sampling strategies~~
 
-  * **Cross-Framework Comparison**
+  * **~~Cross-Framework Comparison~~**
 
-    * Create taxonomy of RL components: policy network, value network, reward computation, experience buffer, optimizer
+    * ~~Create taxonomy of RL components: policy network, value network, reward computation, experience buffer, optimizer~~
 
-    * Map which ASR frameworks provide which RL components natively
+    * ~~Map which ASR frameworks provide which RL components natively~~
 
-    * Identify missing components that must be custom-built
+    * ~~Identify missing components that must be custom-built~~
 
-* **Shivangi:** Investigate Align-SLM  
-  * Analyze the RLAIF (RL with AI Feedback) implementation in Align-SLM
+* **Shivangi:** ~~Investigate Align-SLM~~  
+  * ~~Analyze the RLAIF (RL with AI Feedback) implementation in Align-SLM~~
 
-  * Document Direct Preference Optimization (DPO) adaptation for speech
+  * ~~Document Direct Preference Optimization (DPO) adaptation for speech~~
 
-  * Extract semantic metric computation: how are preference pairs generated?
+  * ~~Extract semantic metric computation: how are preference pairs generated?~~
 
-  * Identify the reward model architecture and training methodology
+  * ~~Identify the reward model architecture and training methodology~~
 
-**Week 9 (30th March \-  3rd April):**
+**Week 11:**
 
-* **Gautam & Shivangi:** Write the Survey Paper and send to prof for feedback
+* **Gautam & Shivangi:** ~~Investigate results from experimentation, plan more robust experiments~~
 
+Week 12 & 13:
 
-**—-----------------------------------------------------------------------------------------------**
+* Run complete experiments for ESPNet & Nemo
 
-**Plan Below This has to Be Changed Depending on how the first 9 Weeks Go**
+Week 14:
 
-**Week 9 (30th March \-  3rd April): Complete Google Cloud Integration**
+* Complete Survey Paper
 
-* **Gautam:**  
-  * Set up **Google Cloud Storage (GCS)** buckets.  
-  * Deploy the Docker container to a Spot Instance to test connectivity.
+Week 15:
 
-* **Shivangi:**  
-  * Establish the different fine-tuning strategies to be used.  
-  * Run a "Smoke Test" on GCP: Train for 1 epoch on a tiny dataset. Verify checkpoints save correctly to GCS/VM.  
-* **Kavya:**   
-  * Set up a batch inference job on GCP to run **OpenAI Whisper**. Establish the "Upper Bound" baseline.  
-    ---
-
-## **Phase 2: Development & "Prevention" Implementation (Weeks 6–8)**
-
-*Goal: Build the "Simulator" and the "Replay Buffer" before running major experiments.*
-
-**Week 6: The Generic Simulator**
-
-* **R1:** Build the **Simulator**: A script that runs each scenario against each model combo with each FT-ing methodology and each dataset selection  
-* **R2:** Integrate the Simulator into the GCP training loop. Ensure the model accepts dynamic data streams.  
-* **R3:** Design the **Sequential Drift Protocol**: Define "Batch 1" (Clean), "Batch 2" (Noisy), "Batch 3" (Accented). Validate the `UniversalEvaluator` works on these specific splits.
-
-**Week 7: Distillation & Oracle Training**
-
-* **R1:** Optimize the Oracle generation script for cost (batch processing).
-
-* **R2:** Run the **Oracle Distillation** experiment: Train Wav2Vec2 using the synthetic "Gold" transcripts.
-
-* **R3:** Analyze Distillation results using the Unified Module. Compare "Student" vs. "Oracle" performance.
-
-**Week 8: Replay Buffer Implementation (Prevention Mechanism)**
-
-* **R1:** Ensure GCP storage can handle "historical" data retrieval efficiently (low latency fetch).
-
-* **R2 (Critical):** Implement the **Experience Replay Buffer**. Modify the data loader to mix $10-20%$ of samples from previous batches into the current training step.
-
-* **R3:** Create the specific "Replay Datasets" (e.g., "Batch 2 mixed with Batch 1").
-
-  ---
-
-## **Phase 3: The Core "Lifelong Learning" Experiments (Weeks 9–11)**
-
-*Goal: Prove that the system learns continuously WITHOUT forgetting.*
-
-**Week 9: The "Naive" Experiment (Baseline Failure)**
-
-* **R1:** Launch the "Naive" training job (Sequential training *without* Replay Buffer). Monitor for memory leaks.
-
-* **R2:** Monitor loss curves.
-
-* **R3:** Evaluate the Naive model on Batch 1 data after it finishes Batch 3 using the Unified Module. Calculate **Backward Transfer (BWT)** to quantify forgetting.
-
-**Week 10: The "Robust" Experiment (The Solution)**
-
-* **R1:** Launch the "Robust" training job (Sequential training *with* Replay Buffer).
-
-* **R2:** Compare validation loss stability between Naive and Robust runs in real-time.
-
-* **R3:** Evaluate the Robust model on Batch 1\. **Success Metric:** BWT should be near-zero or positive (indicating knowledge retention).
-
-**Week 11: Trajectory Analysis & Ops Metrics**
-
-* **R1:** Calculate **Real-Time Factor (RTF)** and **Latency p99** on GCP. Generate the **Cost Efficiency** table (Cost per 1% WER reduction).
-
-* **R2:** Generate the **Visual Trajectory Plot**: Overlay the Naive vs. Robust WER curves.
-
-* **R3:** Perform statistical significance testing (p-values) on the results.
-
-  ---
-
-## **Phase 4: Robustness & Theory (Weeks 12–13)**
-
-*Goal: Prove safety and explain "Why" it works.*
-
-**Week 12: The "Poison" Test (Safety)**
-
-* **R1:** Create a "Poisoned" dataset (transcripts with intentional errors/hallucinations).
-
-* **R2:** Run the fine-tuning loop with Poisoned data. Tune the **Confidence/Rejection Threshold** until the system automatically rejects updates.
-
-* **R3:** Document the "Attack" and "Defense" success rates.
-
-**Week 13: Bag of Tricks (Math & Ablation)**
-
-* **R1:** Assist with visualizing the "Tricks" (e.g., Scheduler logic diagrams).
-
-* **R2:** Finalize **Ablation Study**: Run quick checks to isolate the gain from *just* LLM correction vs. *just* Replay Buffer.
-
-* **R3:** Write the **Mathematical Formulation**. Explain the Replay Buffer as an approximation of the joint probability distribution over all tasks.
-
-  ---
-
-## **Phase 5: Publication (Weeks 14–15)**
-
-*Goal: Finalize the paper.*
-
-**Week 14: Drafting & Figures**
-
-* **R1:** Finalize "Infrastructure" section and "Ops Metrics" table. Create the System Architecture diagram.
-
-* **R2:** Write "Methodology" (Replay Buffer, Oracle) and "Results" (Lifelong Learning).
-
-* **R3:** Write "Introduction," "Related Work," and "Abstract." Ensure the single `UniversalEvaluator` is described clearly as the standard for all reported numbers.
-
-**Week 15: Final Polish & Submission**
-
-* **All Hands:**
-
-  * **Mon-Tue:** Full paper read-through. Cross-check all numbers against raw logs.
-
-  * **Wed:** LaTeX formatting fixes.
-
-  * **Thu:** Final sanity check of citations and tables.
-
-  * **Fri:** Submit.
-
+* Make presentation
